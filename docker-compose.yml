@@ -84,9 +84,13 @@ services:
     restart: unless-stopped
     environment:
       DOMAIN: ${DOMAIN:-ChangeMe}
+      STREAM_DOMAIN: ${STREAM_DOMAIN:-stream.invalid}
     ports:
       - "80:80"
       - "443:443"
+    # Let the container reach MediaMTX running on the VPS host (127.0.0.1:8889).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       - backend
     volumes:

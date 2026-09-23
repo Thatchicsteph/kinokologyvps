@@ -1,8 +1,10 @@
 {
-	email admin@ChangeMe
+	email thatchicstephanie@gmail.com
 }
 
-# Shared routing: /api/* (incl. WebSockets) -> backend, everything else -> SPA
+# ---------------------------------------------------------------------------
+# App routing: /api/* (incl. WebSockets) -> backend, everything else -> SPA
+# ---------------------------------------------------------------------------
 (app) {
 	handle /api/* {
 		reverse_proxy backend:8001
@@ -14,13 +16,27 @@
 	}
 }
 
-# Public HTTPS via Let's Encrypt. Domain comes from the DOMAIN env var
-# (set it in .env). Requires router port-forwards: 80 -> Mac and 443 -> Mac.
+# ---------------------------------------------------------------------------
+# Kinkology app. Domain comes from the DOMAIN env var (set it in .env).
+# ---------------------------------------------------------------------------
 {$DOMAIN:ChangeMe} {
 	import app
 }
 
-# Local owner access on the Mac: http://localhost
+# ---------------------------------------------------------------------------
+# MediaMTX WebRTC stream front-door. This container's Caddy terminates TLS for
+# the stream subdomain and proxies WHEP (SDP over POST) to MediaMTX's HTTP
+# WebRTC port on the host. host.docker.internal resolves to the VPS host from
+# inside the container (see extra_hosts in docker-compose.yml).
+#
+# Set STREAM_DOMAIN in .env (e.g. streamtg30.ddns.net). If it is left unset,
+# this site block binds a harmless placeholder and does nothing.
+# ---------------------------------------------------------------------------
+{$STREAM_DOMAIN:stream.invalid} {
+	reverse_proxy host.docker.internal:8889
+}
+
+# Local owner access on the host: http://localhost
 http://localhost {
 	import app
 }
