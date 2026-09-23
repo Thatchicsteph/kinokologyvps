@@ -1,0 +1,2060 @@
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, Response, WebSocket, WebSocketDisconnect
+from dotenv import load_dotenv
+from starlette.middleware.cors import CORSMiddleware
+from motor.motor_asyncio import AsyncIOMotorClient
+import os
+import re
+import time
+import asyncio
+import logging
+import secrets
+from pathlib import Path
+from pydantic import BaseModel, Field
+from typing import List, Optional, Dict
+from datetime import datetime, timezone, timedelta
+from bson import ObjectId
+from bson.errors import InvalidId
+from pymongo import ReturnDocument
+import bcrypt
+import jwt
+import pyotp
+import qrcode
+import base64
+import hashlib
+import hmac
+import csv
+import json
+from io import BytesIO, StringIO
+
+# Load env BEFORE importing modules that read env at import/apply time (e.g. stream_patch).
+ROOT_DIR = Path(__file__).parent
+load_dotenv(ROOT_DIR / '.env')
+
+# Initialise logging BEFORE stream_patch.apply() so operators see the
+# "patch active / aioice untouched" line in supervisor logs.
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger("ossm-bridge")
+
+from stream import router as stream_router, shutdown as stream_shutdown, set_publish_token_provider, _log_ice_config
+import stream_patch
+
+# Install aioice NAT/Docker patch BEFORE any RTCPeerConnection is created.
+stream_patch.apply()
+_log_ice_config()
+
+mongo_url = os.environ['MONGO_URL']
+client = AsyncIOMotorClient(mongo_url)
+db = client[os.environ['DB_NAME']]
+
+JWT_ALGORITHM = "HS256"
+
+app = FastAPI(title="Kinkology API")
+api_router = APIRouter(prefix="/api")
+
+# ------------------------------------------------------------------
+# OSSM BLE command validation (mirrors firmware regex)
+# ------------------------------------------------------------------
+COMMAND_RE = re.compile(
+    r'^(go:(simplePenetration|strokeEngine|streaming|menu)'
+    r'|set:(speed|stroke|depth|sensation|buffer|pattern):(0|[1-9][0-9]?|100)'
+    r'|stream:(0|[1-9][0-9]?|100):[0-9]+'
+    r'|meta:program:[a-z0-9_\-]{0,32})$'
+)
+
+# Toy commands the active guest is allowed to send. Owner's browser translates
+# these into Intiface / Buttplug calls; the backend is a dumb relay.
+#   toy:vibrate:<0-100>   set intensity on every connected toy
+#   toy:pattern:<slug>    start a named preset from vibrationPatterns.js
+#   toy:stop              stop pattern + zero all toys
+TOY_COMMAND_RE = re.compile(
+    r'^(toy:vibrate:(0|[1-9][0-9]?|100)'
+    r'|toy:pattern:[a-z0-9_\-]{1,32}'
+    r'|toy:stop)$'
+)
+
+def is_valid_command(cmd: str) -> bool:
+    return bool(COMMAND_RE.match(cmd))
+
+def is_valid_toy_command(cmd: str) -> bool:
+    return bool(TOY_COMMAND_RE.match(cmd))
+
+# ------------------------------------------------------------------
+# Auth helpers
+# ------------------------------------------------------------------
+def hash_password(password: str) -> str:
+    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+
+def verify_password(plain: str, hashed: str) -> bool:
+    try:
+        return bcrypt.checkpw(plain.encode("utf-8"), hashed.encode("utf-8"))
+    except Exception:
+        return False
+
+JWT_SECRET_PLACEHOLDER = "CHANGE_ME_run_openssl_rand_hex_32"
+
+def get_jwt_secret() -> str:
+    secret = os.environ.get("JWT_SECRET")
+    if not secret or secret == JWT_SECRET_PLACEHOLDER:
+        raise RuntimeError(
+            "JWT_SECRET is missing or left as the placeholder. "
+            "Set a strong secret in .env (generate with: openssl rand -hex 32)."
+        )
+    return secret
+
+def create_access_token(user_id: str, email: str) -> str:
+    payload = {"sub": user_id, "email": email,
+               "exp": datetime.now(timezone.utc) + timedelta(days=7), "type": "access"}
+    return jwt.encode(payload, get_jwt_secret(), algorithm=JWT_ALGORITHM)
+
+def create_mfa_token(user_id: str, email: str) -> str:
+    payload = {"sub": user_id, "email": email,
+               "exp": datetime.now(timezone.utc) + timedelta(minutes=5), "type": "mfa"}
+    return jwt.encode(payload, get_jwt_secret(), algorithm=JWT_ALGORITHM)
+
+def hash_recovery(code: str) -> str:
+    return hmac.new(get_jwt_secret().encode(), code.strip().upper().encode(), hashlib.sha256).hexdigest()
+
+def make_recovery_codes(n: int = 10):
+    return ["-".join(secrets.token_hex(2).upper() for _ in range(3)) for _ in range(n)]
+
+def qr_data_url(uri: str) -> str:
+    img = qrcode.make(uri)
+    buf = BytesIO()
+    img.save(buf, format="PNG")
+    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+
+# ------------------------------------------------------------------
+# Brute-force lockout / rate limiting
+# ------------------------------------------------------------------
+MAX_ATTEMPTS = 5
+LOCKOUT_SECONDS = 15 * 60
+
+def client_ip(request: Request) -> str:
+    xff = request.headers.get("x-forwarded-for")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+async def check_lockout(identifier: str):
+    doc = await db.login_attempts.find_one({"identifier": identifier})
+    if not doc:
+        return
+    locked_until = doc.get("locked_until", 0)
+    now = time.time()
+    if locked_until and locked_until > now:
+        retry = int(locked_until - now)
+        minutes = max(1, (retry + 59) // 60)
+        raise HTTPException(
+            status_code=429,
+            detail=f"Too many failed attempts. Try again in {minutes} minute{'s' if minutes != 1 else ''}.",
+            headers={"Retry-After": str(retry)},
+        )
+    if locked_until and locked_until <= now:
+        await db.login_attempts.delete_one({"identifier": identifier})
+
+async def record_failure(identifier: str):
+    doc = await db.login_attempts.find_one_and_update(
+        {"identifier": identifier},
+        {"$inc": {"count": 1}, "$set": {"updated": time.time()}},
+        upsert=True, return_document=ReturnDocument.AFTER,
+    )
+    if doc.get("count", 0) >= MAX_ATTEMPTS:
+        await db.login_attempts.update_one(
+            {"identifier": identifier},
+            {"$set": {"locked_until": time.time() + LOCKOUT_SECONDS}},
+        )
+        await log_event("security", "account_locked", actor=identifier,
+                        detail={"attempts": doc.get("count", 0)})
+
+async def clear_attempts(identifier: str):
+    await db.login_attempts.delete_one({"identifier": identifier})
+
+# ------------------------------------------------------------------
+# Audit & activity log
+# ------------------------------------------------------------------
+async def log_event(category: str, action: str, actor: str = "system",
+                    target: Optional[str] = None, detail=None, ip: Optional[str] = None):
+    try:
+        await db.audit_logs.insert_one({
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "category": category, "action": action, "actor": actor,
+            "target": target, "detail": detail, "ip": ip,
+        })
+    except Exception as e:
+        logger.error(f"audit log failed: {e}")
+
+def log_public(d: dict) -> dict:
+    return {
+        "id": str(d["_id"]), "ts": d.get("ts"), "category": d.get("category"),
+        "action": d.get("action"), "actor": d.get("actor"),
+        "target": d.get("target"), "detail": d.get("detail"), "ip": d.get("ip"),
+    }
+
+def decode_token(token: str) -> dict:
+    return jwt.decode(token, get_jwt_secret(), algorithms=[JWT_ALGORITHM])
+
+async def get_current_user(request: Request) -> dict:
+    token = request.cookies.get("access_token")
+    if not token:
+        auth = request.headers.get("Authorization", "")
+        if auth.startswith("Bearer "):
+            token = auth[7:]
+    if not token:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    try:
+        payload = decode_token(token)
+        user = await db.users.find_one({"_id": ObjectId(payload["sub"])})
+        if not user:
+            raise HTTPException(status_code=401, detail="User not found")
+        user["id"] = str(user["_id"])
+        user.pop("_id", None)
+        user.pop("password_hash", None)
+        return user
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+# ------------------------------------------------------------------
+# Models
+# ------------------------------------------------------------------
+class LoginInput(BaseModel):
+    email: str
+    password: str
+
+class SetupInput(BaseModel):
+    email: str
+    password: str
+    local_url: Optional[str] = None
+    public_url: Optional[str] = None
+
+class TwoFAVerify(BaseModel):
+    code: str
+
+class TwoFALogin(BaseModel):
+    mfa_token: str
+    code: Optional[str] = None
+    recovery_code: Optional[str] = None
+
+class CodeCreate(BaseModel):
+    label: str = ""
+    minutes: int = Field(ge=0, le=1440, default=0)
+    view_only: bool = False
+
+class SettingsInput(BaseModel):
+    min_depth: int = Field(ge=0, le=100)
+    max_speed: int = Field(ge=0, le=100)
+    hr_cutoff: int = Field(ge=0, le=300, default=0)
+    toy_length_mm: int = Field(ge=0, le=2000, default=0)
+    rail_travel_mm: int = Field(ge=1, le=2000, default=300)
+    # Manually-jogged max depth (set via the "Calibrate Range" flow: owner
+    # jogs the device with STEP and records the physical endpoint). When
+    # present this OVERRIDES the toy_length/rail_travel calculation below.
+    # Send null/None to clear it and fall back to the computed value.
+    manual_max_depth: Optional[int] = Field(None, ge=0, le=100)
+
+class UrlSettingsInput(BaseModel):
+    local_url: str = ""
+    public_url: str = ""
+    whep_external_url: str = ""
+
+# Valid overlay panel ids (the order here is the canonical default order).
+OVERLAY_PANEL_IDS = ["header", "timer", "heartrate", "program", "speed", "depth", "stroke", "sensation"]
+
+class OverlayConfigInput(BaseModel):
+    panels: List[str] = OVERLAY_PANEL_IDS
+    layout: str = "2col"  # "1col" | "2col"
+
+def gen_code() -> str:
+    alphabet = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
+    return "".join(secrets.choice(alphabet) for _ in range(6))
+
+def compute_toy_max_depth(toy_length_mm: int, rail_travel_mm: int) -> int:
+    """0 means Toy Mode is off (no cap beyond the normal 0-100 range)."""
+    if not toy_length_mm or not rail_travel_mm:
+        return 100
+    return max(0, min(100, round((toy_length_mm / rail_travel_mm) * 100)))
+
+# ------------------------------------------------------------------
+# Realtime hub: relays control from active guest -> host (device holder)
+# ------------------------------------------------------------------
+class Hub:
+    def __init__(self):
+        self.host_ws: Optional[WebSocket] = None
+        self.clients: Dict[str, dict] = {}   # client_id -> {ws, code, label}
+        self.queue: List[str] = []
+        self.active_id: Optional[str] = None
+        self.active_start: Optional[float] = None
+        self.active_remaining_start: int = 0
+        # When the active guest disconnects, we freeze their turn clock during
+        # the reconnect grace window so they aren't charged for time offline.
+        # monotonic timestamp of the disconnect, or None while connected.
+        self.active_paused_at: Optional[float] = None
+        # Seconds of the current active turn that have already been written
+        # back to the code's used_seconds in Mongo. tick() flushes the delta
+        # every FLUSH_INTERVAL_S so a mid-turn backend restart preserves the
+        # guest's remaining time (they auto-reconnect and pick up where they
+        # left off, minus at most one flush interval).
+        self.active_flushed: int = 0
+        self.device_state: str = ""
+        self.limits: dict = {"min_depth": 0, "max_speed": 100, "max_depth": 100}
+        self.hr_cutoff: int = 0
+        self.hr_over: bool = False
+        self.pre_cutoff_speed: int = 0
+        self.hr_target: int = 0
+        self.hr_sync_enabled: bool = False
+        self.overlay_ws: set = set()
+        # Read-only WS clients watching the public chat overlay (OBS browser
+        # source style, like overlay_ws above but for chat messages instead
+        # of telemetry). No client_id / rate limiting needed since these
+        # connections never send anything back — they only receive.
+        self.chat_overlay_ws: set = set()
+        self.telemetry: dict = {"speed": 0, "stroke": 0, "depth": 0, "sensation": 0, "pattern": 0}
+        self.active_program: Optional[str] = None  # app-level auto program reported by guest
+        self.hr: dict = {"bpm": 0, "connected": False}
+        self.hr_sync: dict = {"enabled": False, "target": 120, "min_speed": 0,
+                              "max_speed": 100, "response": 0.6, "ramp_up": 25.0,
+                              "ramp_down": 50.0, "schedule": []}
+        self.hr_sync_command: float = 0.0
+        self.hr_sync_started: Optional[float] = None
+        self.motion_accum: float = 0.0
+        self.motion_start: Optional[float] = None
+        # Toys (Lovense / Intiface) live on the owner's browser. We just track
+        # what the owner reports so guests know whether the toy controls should
+        # appear on their console. `toys_locked` is an owner-triggered kill
+        # switch: while True, guest toy commands are dropped and the owner's
+        # browser is told to stop all toys.
+        self.toys_available: bool = False
+        self.toys_pattern: Optional[str] = None
+        self.toys_locked: bool = False
+        # Display name the owner appears under in chat/reactions/typing
+        # indicators. Defaults to "Owner"; changeable via the admin UI and
+        # persisted in db.settings so it survives a restart.
+        self.owner_name: str = "Owner"
+        # In-memory chat: last 50 messages, oldest first. Each entry:
+        #   {"id": str, "author": str, "role": "owner"|"guest", "text": str, "ts": iso}
+        self.chat_msgs: List[dict] = []
+        # Per-sender rate limit: 1 message / 1s minimum gap.
+        self.chat_last_sent: Dict[str, float] = {}
+        # Presence: last-typing-at monotonic timestamps. Owner uses key "owner";
+        # guests use their client id. A guest is "typing" if last-typing-at is
+        # within TYPING_TTL_S seconds. Presence changes are broadcast to all.
+        self.typing_at: Dict[str, float] = {}
+        # Per-client session stats accumulator (drives the end-of-turn recap
+        # sent to the guest when they get demoted). Keyed by client id.
+        # Shape: {"reactions": {emoji: count}, "chat_count": int,
+        #         "speed_samples": [int, ...], "started_at": monotonic,
+        #         "granted_seconds": int}
+        self.session_stats: Dict[str, dict] = {}
+        # Reconnect grace: when the active guest disconnects (e.g. browser
+        # refresh), we hold the session open for RECONNECT_GRACE_S seconds
+        # instead of immediately ending the turn. Keyed by access-code so a
+        # reconnect with the same code but a new WS/cid can cancel the timer.
+        # Value: asyncio.Task running the grace coroutine.
+        self.disconnect_grace: Dict[str, asyncio.Task] = {}
+        self.lock = asyncio.Lock()
+
+    TYPING_TTL_S = 4.0
+
+    # Reactions rate limit: at most one burst per 400ms per client so a
+    # spammer can't flood the room. Emojis are whitelisted server-side.
+    REACTION_MIN_GAP_S = 0.4
+    REACTION_WHITELIST = {"🔥", "💦", "😩", "👏", "😈", "💜", "🍑", "❤️"}
+
+    async def broadcast_reaction(self, cid: Optional[str], emoji: str) -> None:
+        """Relay a single reaction emoji to everyone (owner + all guests).
+        `cid` is None when the owner reacts. Rate-limited per-sender AND
+        per-emoji so a viewer switching 🔥→💦 back-to-back gets both, but
+        holding 🔥 down at 30fps still gets throttled.
+        """
+        if emoji not in self.REACTION_WHITELIST:
+            return
+        key = cid or "owner"
+        rl_key = f"react:{key}:{emoji}"
+        now = time.monotonic()
+        last = self.chat_last_sent.get(rl_key, 0.0)
+        if now - last < self.REACTION_MIN_GAP_S:
+            return
+        self.chat_last_sent[rl_key] = now
+        if cid:
+            client = self.clients.get(cid)
+            label = ("Guest" if client and client.get("auto_label") else (client["label"] if client else "Guest"))
+        else:
+            label = self.owner_name
+        payload = {"type": "reaction", "id": secrets.token_hex(4), "emoji": emoji, "author": label, "ts": now}
+        await self.send_to_host(payload)
+        for c in list(self.clients.values()):
+            await self._send(c["ws"], payload)
+        # Fold into the sender's session recap counter if they're the active
+        # guest — recap only cares about the person whose turn it is.
+        if cid and cid == self.active_id:
+            stats = self.session_stats.get(cid)
+            if stats is not None:
+                stats["reactions"][emoji] = stats["reactions"].get(emoji, 0) + 1
+
+    def _current_typers(self) -> List[str]:
+        """Labels of clients whose last typing ping is still fresh."""
+        now = time.monotonic()
+        cutoff = now - self.TYPING_TTL_S
+        labels: List[str] = []
+        for cid, ts in list(self.typing_at.items()):
+            if ts < cutoff:
+                # Expired — drop lazily.
+                self.typing_at.pop(cid, None)
+                continue
+            if cid == "owner":
+                labels.append(self.owner_name)
+            else:
+                client = self.clients.get(cid)
+                if client:
+                    labels.append(client["label"])
+        return labels
+
+    def _presence_payload(self) -> dict:
+        return {
+            "type": "presence",
+            "owner_online": self.host_ws is not None,
+            # Only expose the display label — never raw access codes for
+            # auto-labelled clients (same rule the queue broadcast follows).
+            "guests": [
+                {"id": cid, "label": ("Guest" if c.get("auto_label") else c["label"])}
+                for cid, c in self.clients.items()
+            ],
+            "typing": self._current_typers(),
+        }
+
+    async def broadcast_presence(self) -> None:
+        payload = self._presence_payload()
+        await self.send_to_host(payload)
+        for c in list(self.clients.values()):
+            await self._send(c["ws"], payload)
+
+    async def broadcast_theme(self, theme: str) -> None:
+        """Push a fresh theme to everyone connected. Guests + owner apply it
+        to <html data-theme=…> so the UI reskins without a reload."""
+        payload = {"type": "theme", "theme": theme}
+        await self.send_to_host(payload)
+        for c in list(self.clients.values()):
+            await self._send(c["ws"], payload)
+
+    async def toggle_chat_reaction(self, msg_id: str, emoji: str, author: str) -> None:
+        """Toggle `emoji` reaction on chat message `msg_id` for `author`.
+        Broadcast the updated reactions map. Whitelisted emojis only."""
+        if emoji not in self.REACTION_WHITELIST:
+            return
+        if not msg_id or not author:
+            return
+        target = None
+        for m in self.chat_msgs:
+            if m.get("id") == msg_id:
+                target = m
+                break
+        if target is None:
+            return
+        reactions = target.setdefault("reactions", {})
+        authors = reactions.get(emoji, [])
+        if author in authors:
+            authors = [a for a in authors if a != author]
+        else:
+            authors = [*authors, author]
+        if authors:
+            reactions[emoji] = authors
+        else:
+            reactions.pop(emoji, None)
+        payload = {
+            "type": "chat_react",
+            "msg_id": msg_id,
+            "reactions": reactions,
+        }
+        await self.send_to_host(payload)
+        for c in list(self.clients.values()):
+            await self._send(c["ws"], payload)
+        await self.push_chat_overlay(payload)
+
+    @staticmethod
+    def _clean_label(name: str) -> Optional[str]:
+        """Shared sanitizer for any chat display name (guest nickname or
+        owner name): strips anything but word chars/spaces/-.!?, caps at
+        24 chars, and rejects anything left too short to be useful."""
+        cleaned = re.sub(r"[^\w \-\.\!\?]", "", (name or "").strip())[:24].strip()
+        return cleaned if len(cleaned) >= 2 else None
+
+    async def set_client_nickname(self, cid: str, name: str) -> Optional[str]:
+        """Sanitize + set a guest's nickname. Returns the final label or None
+        if rejected. Broadcasts state + presence so labels update everywhere."""
+        client = self.clients.get(cid)
+        if client is None:
+            return None
+        cleaned = self._clean_label(name)
+        if cleaned is None:
+            return None
+        client["label"] = cleaned
+        client["auto_label"] = False
+        await self.broadcast()
+        await self.broadcast_presence()
+        return cleaned
+
+    async def set_owner_name(self, name: str) -> Optional[str]:
+        """Sanitize + set the owner's own chat display name (shown as the
+        author of owner chat messages, reactions, and the typing indicator).
+        Returns the final name or None if rejected. Broadcasts presence so
+        anyone currently seeing "Owner is typing…" picks up the new label."""
+        cleaned = self._clean_label(name)
+        if cleaned is None:
+            return None
+        self.owner_name = cleaned
+        await self.broadcast_presence()
+        return cleaned
+
+    # ---- session recap ---------------------------------------------------
+    def _init_stats(self, cid: str) -> None:
+        client = self.clients.get(cid)
+        code = client["code"] if client else ""
+        self.session_stats[cid] = {
+            "reactions": {},
+            "chat_count": 0,
+            "speed_samples": [],
+            "started_at": time.monotonic(),
+            "granted_seconds": self.active_remaining_start,
+            "code": code,
+        }
+
+    def _record_speed_sample(self) -> None:
+        """Log the current speed onto the active guest's recap accumulator.
+        Called from tick() while a turn is running."""
+        cid = self.active_id
+        if not cid:
+            return
+        stats = self.session_stats.get(cid)
+        if stats is None:
+            return
+        stats["speed_samples"].append(int(self.telemetry.get("speed", 0)))
+
+    def _build_recap(self, cid: str) -> dict:
+        stats = self.session_stats.get(cid) or {}
+        samples = stats.get("speed_samples") or []
+        moving = [s for s in samples if s > 0]
+        reactions_by_emoji = stats.get("reactions") or {}
+        top = sorted(reactions_by_emoji.items(), key=lambda kv: kv[1], reverse=True)[:3]
+        elapsed = int(time.monotonic() - stats.get("started_at", time.monotonic()))
+        used = min(elapsed, stats.get("granted_seconds", elapsed))
+        return {
+            "used_seconds": used,
+            "granted_seconds": stats.get("granted_seconds", 0),
+            "chat_count": stats.get("chat_count", 0),
+            "reactions_total": sum(reactions_by_emoji.values()),
+            "reactions_top": [{"emoji": e, "count": c} for e, c in top],
+            "avg_speed_percent": int(sum(moving) / len(moving)) if moving else 0,
+            "peak_speed_percent": max(samples) if samples else 0,
+        }
+
+    async def _emit_recap(self, cid: str, reason: str) -> None:
+        client = self.clients.get(cid)
+        if client is None:
+            return
+        try:
+            recap = self._build_recap(cid)
+            recap["reason"] = reason
+            await self._send(client["ws"], {"type": "session_recap", "recap": recap})
+        except Exception as e:
+            logger.error(f"session_recap emit failed: {e}")
+
+    async def mark_typing(self, cid: str) -> None:
+        """Record that `cid` (or 'owner') is typing right now, and broadcast
+        the updated presence payload so everyone sees the dots."""
+        self.typing_at[cid] = time.monotonic()
+        await self.broadcast_presence()
+
+    def _update_motion(self, speed: int):
+        now = time.monotonic()
+        if speed > 0 and self.motion_start is None:
+            self.motion_start = now
+        elif speed == 0 and self.motion_start is not None:
+            self.motion_accum += now - self.motion_start
+            self.motion_start = None
+
+    def reset_telemetry(self):
+        self.telemetry = {"speed": 0, "stroke": 0, "depth": 0, "sensation": 0, "pattern": 0}
+        self.active_program = None
+        self.motion_accum = 0.0
+        self.motion_start = None
+
+    def telemetry_frame(self) -> dict:
+        now = time.monotonic()
+        run = self.motion_accum + (now - self.motion_start if self.motion_start else 0)
+        session = int(now - self.active_start) if (self.active_id and self.active_start) else 0
+        label = self.clients[self.active_id]["label"] if (self.active_id and self.active_id in self.clients) else None
+        return {
+            "type": "telemetry",
+            "host_connected": self.host_ws is not None,
+            "controller": label,
+            "running": self.telemetry["speed"] > 0,
+            "run_seconds": int(run),
+            "session_seconds": session,
+            "hr_bpm": int(self.hr.get("bpm", 0)),
+            "hr_connected": bool(self.hr.get("connected", False)),
+            "hr_cutoff": int(self.hr_cutoff),
+            "hr_over": bool(self.hr_over),
+            "hr_target": int(self.hr_target),
+            "hr_sync_enabled": bool(self.hr_sync_enabled),
+            "active_program": self.active_program,
+            **self.telemetry,
+        }
+
+    async def push_telemetry(self):
+        frame = self.telemetry_frame()
+        for ws in list(self.overlay_ws):
+            try:
+                await ws.send_json(frame)
+            except Exception:
+                self.overlay_ws.discard(ws)
+
+    async def push_chat_overlay(self, payload: dict):
+        """Fan a chat event out to public chat-overlay viewers (OBS browser
+        source). Mirrors push_telemetry's discard-on-failure pattern."""
+        for ws in list(self.chat_overlay_ws):
+            try:
+                await ws.send_json(payload)
+            except Exception:
+                self.chat_overlay_ws.discard(ws)
+
+    async def evaluate_hr_cutoff(self):
+        """Force-stop and block motion when live BPM crosses the safety cutoff;
+        resume automatically once BPM drops back below it."""
+        cutoff = int(self.hr_cutoff or 0)
+        bpm = int(self.hr.get("bpm", 0))
+        if cutoff > 0 and self.hr.get("connected") and bpm >= cutoff:
+            if not self.hr_over:
+                self.hr_over = True
+                self.pre_cutoff_speed = int(self.telemetry.get("speed", 0))
+                await self.send_to_host({"type": "command", "cmd": "set:speed:0"})
+                await self.send_to_host({"type": "command", "cmd": "go:menu"})
+                self.telemetry["speed"] = 0
+                self._update_motion(0)
+                await log_event("security", "hr_cutoff_triggered", actor="system",
+                                detail={"bpm": bpm, "cutoff": cutoff})
+        elif self.hr_over and self.hr.get("connected") and bpm < cutoff:
+            self.hr_over = False
+            await log_event("security", "hr_cutoff_cleared", actor="system",
+                            detail={"bpm": bpm, "cutoff": cutoff})
+            resume_speed = self.clamp_command(f"set:speed:{self.pre_cutoff_speed}")[0]
+            resume_speed = int(resume_speed.split(":")[-1])
+            # The cutoff trip always sends go:menu, regardless of hr_sync_enabled,
+            # so the resume must always send go:strokeEngine to bring the device
+            # back — otherwise it stays parked on the menu screen forever.
+            await self.send_to_host({"type": "command", "cmd": "go:strokeEngine"})
+            # If HR Sync is driving speed itself, let its own control loop take it
+            # from here; otherwise restore motion to where it was before the trip.
+            if not self.hr_sync_enabled and resume_speed > 0:
+                await self.send_to_host({"type": "command", "cmd": f"set:speed:{resume_speed}"})
+                self.telemetry["speed"] = resume_speed
+                self._update_motion(resume_speed)
+            await log_event("security", "hr_cutoff_resumed", actor="system",
+                            detail={"bpm": bpm, "cutoff": cutoff,
+                                     "speed": resume_speed if not self.hr_sync_enabled else self.telemetry.get("speed", 0)})
+            self.pre_cutoff_speed = 0
+
+    def clamp_command(self, cmd: str) -> list[str]:
+        # Heart-rate safety cutoff: while over the limit, no motion is allowed.
+        if self.hr_over and (cmd.startswith("set:speed:") or cmd == "go:strokeEngine"):
+            return ["set:speed:0"]
+        m = re.match(r'^set:(depth|speed|stroke):(\d+)$', cmd)
+        if not m:
+            return [cmd]
+        kind, val = m.group(1), int(m.group(2))
+        min_depth = self.limits.get("min_depth", 0)
+        max_depth = self.limits.get("max_depth", 100)
+        if kind == "depth" and val < min_depth:
+            val = min_depth
+            cmd = f'set:depth:{val}'
+        elif kind == "depth" and val > max_depth:
+            val = max_depth
+            cmd = f'set:depth:{val}'
+        if kind == "speed" and val > self.limits.get("max_speed", 100):
+            return [f'set:speed:{self.limits["max_speed"]}']
+        # Firmware convention: top of stroke = depth, bottom of stroke =
+        # depth - stroke. Depth is clamped above; stroke must also be capped
+        # so it can't pull the bottom of travel below min_depth.
+        if kind == "stroke":
+            current_depth = self.telemetry.get("depth", max_depth)
+            max_stroke = max(0, current_depth - min_depth)
+            if val > max_stroke:
+                return [f'set:stroke:{max_stroke}']
+            return [cmd]
+        if kind == "depth":
+            # If the (possibly just-clamped) depth would now put the bottom
+            # of the current stroke below min_depth, correct the stroke too.
+            out = [cmd]
+            current_stroke = self.telemetry.get("stroke", 0)
+            max_stroke = max(0, val - min_depth)
+            if current_stroke > max_stroke:
+                out.append(f'set:stroke:{max_stroke}')
+            return out
+        return [cmd]
+
+    def active_remaining(self) -> int:
+        if self.active_id is None or self.active_start is None:
+            return 0
+        # While paused (guest disconnected, within grace), the clock is frozen
+        # at the disconnect moment so no turn time is consumed while offline.
+        ref = self.active_paused_at if self.active_paused_at is not None else time.monotonic()
+        elapsed = ref - self.active_start
+        return max(0, int(self.active_remaining_start - elapsed))
+
+    async def _send(self, ws: Optional[WebSocket], payload: dict):
+        if ws is None:
+            return
+        try:
+            await ws.send_json(payload)
+        except Exception:
+            pass
+
+    async def send_to_host(self, payload: dict):
+        await self._send(self.host_ws, payload)
+
+    async def code_remaining(self, code: str) -> int:
+        doc = await db.access_codes.find_one({"code": code})
+        if not doc or doc.get("revoked"):
+            return 0
+        return max(0, int(doc.get("granted_seconds", 0) - doc.get("used_seconds", 0)))
+
+    async def promote(self):
+        """Promote next queued client to active if slot is free."""
+        while self.active_id is None and self.queue:
+            cid = self.queue[0]
+            client = self.clients.get(cid)
+            if client is None:
+                self.queue.pop(0)
+                continue
+            remaining = await self.code_remaining(client["code"])
+            if remaining <= 0:
+                self.queue.pop(0)
+                await self._send(client["ws"], {"type": "expired"})
+                continue
+            self.queue.pop(0)
+            self.active_id = cid
+            self.active_start = time.monotonic()
+            self.active_remaining_start = remaining
+            self.active_flushed = 0
+            self.active_paused_at = None
+            self._init_stats(cid)
+            self.reset_telemetry()
+            await log_event("session", "guest_active", actor=f"guest:{client['label']}",
+                            target=client["code"], detail={"remaining_seconds": remaining})
+            break
+
+    async def end_active(self, reason: str = "ended"):
+        if self.active_id is None:
+            return
+        cid = self.active_id
+        client = self.clients.get(cid)
+        # Cancel any pending reconnect grace timer for this code.
+        if client:
+            grace_task = self.disconnect_grace.pop(client.get("code", ""), None)
+            if grace_task:
+                grace_task.cancel()
+        # If the turn ended while paused (grace expired), count only up to the
+        # disconnect moment — the guest isn't charged for the grace window.
+        ref = self.active_paused_at if self.active_paused_at is not None else time.monotonic()
+        elapsed = int(ref - (self.active_start or ref))
+        consumed = min(elapsed, self.active_remaining_start)
+        # Only write the seconds we haven't already flushed via the periodic
+        # ticker — otherwise we double-count and the guest loses time.
+        delta = max(0, consumed - self.active_flushed)
+        if client:
+            await db.access_codes.update_one(
+                {"code": client["code"]},
+                {"$inc": {"used_seconds": delta},
+                 "$set": {"last_used_at": datetime.now(timezone.utc).isoformat()}},
+            )
+            # Ship the end-of-turn recap BEFORE we flip the guest into
+            # spectator mode so the card renders while they still have context.
+            await self._emit_recap(cid, reason)
+            # When the guest's time runs out, we DON'T disconnect them anymore
+            # — they demote to view-only spectators (still see the stream, chat,
+            # and presence). For all other reasons the socket stays too; the
+            # frontend handles the `turn_ended` message.
+            if reason == "time_up":
+                client["expired"] = True
+                await self._send(client["ws"], {"type": "turn_ended", "reason": reason, "keep_connection": True})
+            else:
+                await self._send(client["ws"], {"type": "turn_ended", "reason": reason})
+            await log_event("session", "turn_ended", actor=f"guest:{client['label']}",
+                            target=client["code"], detail={"reason": reason, "seconds": consumed})
+        # Safety: stop the device between turns
+        await self.send_to_host({"type": "command", "cmd": "set:speed:0"})
+        await self.send_to_host({"type": "command", "cmd": "go:menu"})
+        self.active_id = None
+        self.active_start = None
+        self.active_remaining_start = 0
+        self.active_flushed = 0
+        self.active_paused_at = None
+        # Drop the recap accumulator for this turn now that we've emitted it.
+        self.session_stats.pop(cid, None)
+        self.reset_telemetry()
+        await self.push_telemetry()
+
+    RECONNECT_GRACE_S = 20  # seconds before a disconnected active guest loses their turn
+
+    async def _grace_expire(self, code: str):
+        """Called after RECONNECT_GRACE_S if the guest hasn't reconnected.
+        Sends a gentle stop to the minimum depth instead of go:menu so the
+        device doesn't snap to the physical home position."""
+        await asyncio.sleep(self.RECONNECT_GRACE_S)
+        async with self.lock:
+            self.disconnect_grace.pop(code, None)
+            if self.active_id is None:
+                return  # already ended by something else (skip, emergency stop, etc.)
+            # Check the active client is still the one we're timing out for
+            active_client = self.clients.get(self.active_id)
+            if active_client and active_client.get("code") == code:
+                min_depth = self.limits.get("min_depth", 0)
+                # Soft stop: hold at min_depth instead of snapping to menu/home
+                await self.send_to_host({"type": "command", "cmd": "set:speed:0"})
+                await self.send_to_host({"type": "command", "cmd": f"set:depth:{min_depth}"})
+                await self.end_active("disconnected")
+                await self.promote()
+                await self.broadcast()
+
+    async def add_client(self, cid: str, ws: WebSocket, code: str, label: str, auto_label: bool = False, view_only: bool = False):
+        # If a grace timer is running for this code, the guest refreshed their
+        # browser — cancel the timer and restore them as the active controller
+        # without touching the device position.
+        grace_task = self.disconnect_grace.pop(code, None)
+        if grace_task is not None:
+            grace_task.cancel()
+            # Re-link this new cid to the existing active session.
+            # The old cid has already been removed from self.clients by
+            # remove_client, so we just register the new one and skip
+            # the normal queue → promote flow.
+            self.clients[cid] = {
+                "ws": ws, "code": code, "label": label,
+                "auto_label": auto_label,
+                "view_only": view_only,
+                "expired": False,
+            }
+            # Swap active_id to the new cid so commands flow again.
+            self.active_id = cid
+            # Un-freeze the turn clock: shift active_start forward by however
+            # long they were disconnected, so the paused seconds don't count.
+            if self.active_paused_at is not None and self.active_start is not None:
+                paused_for = time.monotonic() - self.active_paused_at
+                self.active_start += paused_for
+            self.active_paused_at = None
+            # Tell the new WS immediately so the frontend restores its control
+            # UI without waiting for the next broadcast cycle.
+            remaining = self.active_remaining()
+            await self._send(ws, {
+                "type": "reconnected",
+                "remaining_seconds": remaining,
+                **self.telemetry_frame(),
+            })
+            await log_event("session", "guest_reconnected", actor=f"guest:{label}", target=code)
+            return
+        # auto_label is True when the owner didn't set a custom label for this
+        # access code, so `label` fell back to the raw code itself. That raw
+        # code must never be shown to *other* guests (only to the owner/host,
+        # who already has it on the Manage Codes panel).
+        # view_only clients bypass the control queue entirely — they see the
+        # stream and chat but can't send commands. `expired` tracks control
+        # codes whose time ran out mid-session; those stay connected as
+        # spectators (same UX as view_only from that point on).
+        self.clients[cid] = {
+            "ws": ws, "code": code, "label": label,
+            "auto_label": auto_label,
+            "view_only": view_only,
+            "expired": False,
+        }
+        # View-only clients are never queued and never become active.
+        if not view_only and cid not in self.queue and cid != self.active_id:
+            self.queue.append(cid)
+        await log_event("session", "guest_joined", actor=f"guest:{label}", target=code)
+        if not view_only:
+            await self.promote()
+        await self.broadcast_presence()
+
+    async def remove_client(self, cid: str):
+        if cid in self.queue:
+            self.queue.remove(cid)
+        if self.active_id == cid:
+            client = self.clients.get(cid)
+            code = client["code"] if client else None
+            # Stop the device immediately — we can't tell a refresh from a
+            # deliberate close, so the machine must never keep running
+            # unattended. The grace period preserves session state so a
+            # browser refresh can resume; it does NOT keep the machine moving.
+            await self.send_to_host({"type": "command", "cmd": "set:speed:0"})
+            self._update_motion(0)  # stop the run-time accumulator too
+            # Freeze the turn clock at this moment so the guest isn't charged
+            # for time spent disconnected during the grace window.
+            if self.active_paused_at is None:
+                self.active_paused_at = time.monotonic()
+            # Remove from clients map immediately (the WS is gone) but don't
+            # end the turn yet — start a grace period so a browser refresh
+            # reconnects cleanly and can resume from the paused state.
+            self.clients.pop(cid, None)
+            self.typing_at.pop(cid, None)
+            if code and code not in self.disconnect_grace:
+                task = asyncio.create_task(self._grace_expire(code))
+                self.disconnect_grace[code] = task
+            await self.broadcast_presence()
+            return
+        self.clients.pop(cid, None)
+        self.typing_at.pop(cid, None)
+        await self.broadcast_presence()
+
+    async def handle_command(self, cid: str, cmd: str):
+        if cid != self.active_id:
+            return
+        if not is_valid_command(cmd):
+            return
+        # meta:program commands are state-only — they are NOT forwarded to the
+        # host/device. They just record what auto-program the guest is running
+        # so the overlay and admin can show it.
+        if cmd.startswith("meta:program:"):
+            slug = cmd.split(":", 2)[2]
+            self.active_program = slug if slug else None
+            await self.push_telemetry()
+            return
+        for out_cmd in self.clamp_command(cmd):
+            m = re.match(r'^set:(speed|stroke|depth|sensation):(\d+)$', out_cmd)
+            if m:
+                self.telemetry[m.group(1)] = int(m.group(2))
+                if m.group(1) == "speed":
+                    self._update_motion(int(m.group(2)))
+            pm = re.match(r'^set:pattern:(\d+)$', out_cmd)
+            if pm:
+                self.telemetry["pattern"] = int(pm.group(1))
+            await self.send_to_host({"type": "command", "cmd": out_cmd})
+        await self.push_telemetry()
+
+    async def handle_toy_command(self, cid: str, cmd: str):
+        """Relay a toy command from the active guest to the owner's browser.
+        Owner-side `useToys` interprets it against the actual Intiface client."""
+        if cid != self.active_id:
+            return
+        if not is_valid_toy_command(cmd):
+            return
+        if not self.toys_available:
+            return  # owner isn't hosting any toys — silently drop
+        if self.toys_locked:
+            return  # owner has paused guest toy control
+        if cmd.startswith("toy:pattern:"):
+            self.toys_pattern = cmd.split(":", 2)[2]
+        elif cmd == "toy:stop" or cmd.startswith("toy:vibrate:"):
+            # A direct nudge or stop clears the "running pattern" indicator.
+            self.toys_pattern = None
+        await self.send_to_host({"type": "toy_command", "cmd": cmd})
+
+    CHAT_MAX_LEN = 250
+    CHAT_HISTORY = 50
+    CHAT_MIN_GAP = 1.0  # seconds between messages from the same sender
+
+    def _rate_limit(self, sender_id: str) -> bool:
+        now = time.monotonic()
+        last = self.chat_last_sent.get(sender_id, 0.0)
+        if now - last < self.CHAT_MIN_GAP:
+            return False
+        self.chat_last_sent[sender_id] = now
+        return True
+
+    async def _append_chat(self, author: str, role: str, text: str, sender_id: str) -> Optional[dict]:
+        text = (text or "").strip()
+        if not text:
+            return None
+        if len(text) > self.CHAT_MAX_LEN:
+            text = text[: self.CHAT_MAX_LEN]
+        if not self._rate_limit(sender_id):
+            return None
+        msg = {
+            "id": secrets.token_hex(6),
+            "author": author,
+            "role": role,
+            "text": text,
+            "ts": datetime.now(timezone.utc).isoformat(),
+            # Reactions: {emoji: [author_label, …]}. Toggled per-viewer via
+            # the `chat_react` WS event.
+            "reactions": {},
+        }
+        self.chat_msgs.append(msg)
+        if len(self.chat_msgs) > self.CHAT_HISTORY:
+            self.chat_msgs = self.chat_msgs[-self.CHAT_HISTORY :]
+        # Fan out to everyone connected.
+        frame = {"type": "chat_msg", "message": msg}
+        await self.send_to_host(frame)
+        for c in list(self.clients.values()):
+            await self._send(c["ws"], frame)
+        await self.push_chat_overlay(frame)
+        # Bump per-session chat count so the recap picks it up.
+        if role == "guest":
+            cid = sender_id[2:] if sender_id.startswith("g:") else sender_id
+            stats = self.session_stats.get(cid)
+            if stats is not None:
+                stats["chat_count"] = stats.get("chat_count", 0) + 1
+        return msg
+
+    async def handle_guest_chat(self, cid: str, text: str):
+        client = self.clients.get(cid)
+        if not client:
+            return
+        author = self._safe_label(client)
+        await self._append_chat(author=author, role="guest", text=text, sender_id=f"g:{cid}")
+
+    async def handle_owner_chat(self, text: str):
+        await self._append_chat(author=self.owner_name, role="owner", text=text, sender_id="owner")
+
+    def client_status(self, cid: str) -> dict:
+        client = self.clients.get(cid)
+        # View-only or time-expired clients are permanent spectators — they
+        # never queue and never gain control, but stay connected to watch.
+        if client and (client.get("view_only") or client.get("expired")):
+            return {"status": "spectator", "position": -1, "remaining_seconds": 0}
+        if cid == self.active_id:
+            return {"status": "active", "position": 0, "remaining_seconds": self.active_remaining()}
+        if cid in self.queue:
+            return {"status": "waiting", "position": self.queue.index(cid) + 1,
+                    "remaining_seconds": 0}
+        return {"status": "idle", "position": -1, "remaining_seconds": 0}
+
+    @staticmethod
+    def _safe_label(c: dict) -> str:
+        # What other guests are allowed to see: never the raw access code.
+        return "Guest" if c.get("auto_label") else c["label"]
+
+    def public_state(self, for_guests: bool = False) -> dict:
+        active_label = None
+        if self.active_id and self.active_id in self.clients:
+            active_client = self.clients[self.active_id]
+            active_label = self._safe_label(active_client) if for_guests else active_client["label"]
+        queue_view = []
+        for i, cid in enumerate(self.queue):
+            c = self.clients.get(cid)
+            if c:
+                label = self._safe_label(c) if for_guests else c["label"]
+                queue_view.append({"label": label, "position": i + 1})
+        return {
+            "host_connected": self.host_ws is not None,
+            "device_state": self.device_state,
+            "active": {"label": active_label, "remaining_seconds": self.active_remaining()} if self.active_id else None,
+            "queue": queue_view,
+            "queue_length": len(self.queue),
+            "limits": self.limits,
+            "toys": {"available": self.toys_available, "pattern": self.toys_pattern, "locked": self.toys_locked},
+            "telemetry": {
+                "speed": self.telemetry.get("speed", 0),
+                "depth": self.telemetry.get("depth", 0),
+                "stroke": self.telemetry.get("stroke", 0),
+                "sensation": self.telemetry.get("sensation", 0),
+                "pattern": self.telemetry.get("pattern", 0),
+                "active_program": self.active_program,
+            },
+        }
+
+    async def broadcast(self):
+        # host sees real labels (owner already has codes on Manage Codes)
+        host_base = self.public_state(for_guests=False)
+        await self.send_to_host({"type": "state", **host_base})
+        # guests only ever see sanitized labels for OTHER people in the
+        # queue/active slot — their own code is never echoed back to anyone
+        # but themselves via the top-level "label" field below.
+        guest_base = self.public_state(for_guests=True)
+        for cid, c in list(self.clients.items()):
+            payload = {"type": "state", **guest_base, "you": self.client_status(cid), "label": c["label"]}
+            await self._send(c["ws"], payload)
+
+    # Flush active-turn elapsed time to Mongo this often. A backend restart
+    # (or crash) loses at most this many seconds of the guest's remaining
+    # time — they auto-reconnect after and pick up the rest.
+    FLUSH_INTERVAL_S = 5
+    CLIENT_PING_INTERVAL_S = 15  # how often to probe each guest WS for liveness
+
+    async def _flush_active_used_seconds(self) -> None:
+        """Persist unwritten elapsed seconds of the current turn.
+        Called every FLUSH_INTERVAL_S from tick(); reads state without the
+        Hub lock (already held by the caller).
+        """
+        if self.active_id is None or self.active_start is None:
+            return
+        client = self.clients.get(self.active_id)
+        if client is None:
+            return
+        elapsed = int(time.monotonic() - self.active_start)
+        consumed = min(elapsed, self.active_remaining_start)
+        delta = consumed - self.active_flushed
+        if delta <= 0:
+            return
+        try:
+            await db.access_codes.update_one(
+                {"code": client["code"]},
+                {"$inc": {"used_seconds": delta},
+                 "$set": {"last_used_at": datetime.now(timezone.utc).isoformat()}},
+            )
+            self.active_flushed = consumed
+        except Exception as e:
+            logger.error(f"used_seconds flush failed: {e}")
+
+    async def tick(self):
+        async with self.lock:
+            # While a turn is paused (guest disconnected, in grace window) the
+            # clock is frozen — don't expire the turn or flush used seconds.
+            paused = self.active_paused_at is not None
+            if not paused and self.active_id is not None and self.active_remaining() <= 0:
+                await self.end_active("time_up")
+                await self.promote()
+            # Persist the running clock so a restart doesn't hand the guest
+            # back all their spent time.
+            if not paused and self.active_id is not None and self.active_start is not None:
+                elapsed = int(time.monotonic() - self.active_start)
+                if elapsed - self.active_flushed >= self.FLUSH_INTERVAL_S:
+                    await self._flush_active_used_seconds()
+            # Snapshot the current speed onto the active guest's recap
+            # accumulator once per tick so we can compute avg/peak later.
+            self._record_speed_sample()
+            await self.broadcast()
+            await self.push_telemetry()
+            # Probe guest connections for liveness at a fixed interval.
+            # Remote clients that dropped without a clean TCP FIN (mobile
+            # network switch, tab crash, silent NAT expiry) never raise
+            # WebSocketDisconnect. Attempting a small send catches them.
+            now = time.monotonic()
+            stale_cids = []
+            for cid, client in list(self.clients.items()):
+                last_ping = client.get("_last_ping", 0)
+                if now - last_ping >= self.CLIENT_PING_INTERVAL_S:
+                    client["_last_ping"] = now
+                    try:
+                        await client["ws"].send_json({"type": "ping"})
+                    except Exception:
+                        stale_cids.append(cid)
+            for cid in stale_cids:
+                logger.info(f"evicting stale client {cid} (liveness ping failed)")
+                await self.remove_client(cid)
+            if stale_cids:
+                await self.broadcast()
+
+hub = Hub()
+
+async def ticker_loop():
+    while True:
+        try:
+            await hub.tick()
+        except Exception as e:
+            logger.error(f"ticker error: {e}")
+        await asyncio.sleep(1)
+
+# ------------------------------------------------------------------
+# Auth routes
+# ------------------------------------------------------------------
+@api_router.get("/setup/status")
+async def setup_status():
+    count = await db.users.count_documents({})
+    return {"needs_setup": count == 0}
+
+@api_router.post("/setup")
+async def setup_admin(body: SetupInput, request: Request, response: Response):
+    if await db.users.count_documents({}) > 0:
+        raise HTTPException(status_code=403, detail="Setup already completed. Please sign in.")
+    email = body.email.strip().lower()
+    if "@" not in email or "." not in email:
+        raise HTTPException(status_code=400, detail="Enter a valid email address.")
+    if len(body.password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters.")
+    res = await db.users.insert_one({
+        "email": email, "password_hash": hash_password(body.password),
+        "name": "Admin", "role": "admin", "created_at": datetime.now(timezone.utc).isoformat(),
+    })
+    url_update = {}
+    if body.local_url is not None:
+        url_update["local_url"] = body.local_url.strip()
+    if body.public_url is not None:
+        url_update["public_url"] = body.public_url.strip()
+    if url_update:
+        await db.settings.update_one({"_id": "global"}, {"$set": url_update}, upsert=True)
+    uid = str(res.inserted_id)
+    token = create_access_token(uid, email)
+    response.set_cookie("access_token", token, httponly=True, secure=True,
+                        samesite="lax", max_age=604800, path="/")
+    await log_event("security", "owner_created", actor=email, ip=client_ip(request))
+    return {"token": token, "user": {"id": uid, "email": email, "name": "Admin"}}
+
+@api_router.post("/auth/login")
+async def login(body: LoginInput, request: Request, response: Response):
+    email = body.email.strip().lower()
+    ident = f"{client_ip(request)}:login:{email}"
+    await check_lockout(ident)
+    user = await db.users.find_one({"email": email})
+    if not user or not verify_password(body.password, user["password_hash"]):
+        await record_failure(ident)
+        await log_event("security", "login_failed", actor=email, ip=client_ip(request))
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    await clear_attempts(ident)
+    uid = str(user["_id"])
+    if user.get("twofa_enabled"):
+        return {"mfa_required": True, "mfa_token": create_mfa_token(uid, email)}
+    token = create_access_token(uid, email)
+    response.set_cookie("access_token", token, httponly=True, secure=True,
+                        samesite="lax", max_age=604800, path="/")
+    await log_event("security", "login_success", actor=email, ip=client_ip(request))
+    return {"token": token, "user": {"id": uid, "email": email, "name": user.get("name", "Admin")}}
+
+@api_router.post("/auth/2fa/login")
+async def twofa_login(body: TwoFALogin, request: Request, response: Response):
+    try:
+        payload = decode_token(body.mfa_token)
+        if payload.get("type") != "mfa":
+            raise ValueError()
+    except Exception:
+        raise HTTPException(status_code=401, detail="Your 2FA session expired. Please log in again.")
+    ident = f"{client_ip(request)}:2fa:{payload.get('email','')}"
+    await check_lockout(ident)
+    user = await db.users.find_one({"_id": ObjectId(payload["sub"])})
+    if not user or not user.get("twofa_enabled"):
+        raise HTTPException(status_code=401, detail="Invalid 2FA state")
+    ok = False
+    if body.code:
+        ok = pyotp.TOTP(user["totp_secret"]).verify(body.code.strip(), valid_window=1)
+    elif body.recovery_code:
+        h = hash_recovery(body.recovery_code)
+        hashes = user.get("recovery_codes_hash", [])
+        if h in hashes:
+            ok = True
+            await db.users.update_one({"_id": user["_id"]},
+                                      {"$set": {"recovery_codes_hash": [x for x in hashes if x != h]}})
+    if not ok:
+        await record_failure(ident)
+        raise HTTPException(status_code=401, detail="Invalid code. Try again.")
+    await clear_attempts(ident)
+    uid = str(user["_id"]); email = user["email"]
+    token = create_access_token(uid, email)
+    response.set_cookie("access_token", token, httponly=True, secure=True,
+                        samesite="lax", max_age=604800, path="/")
+    await log_event("security", "login_success",
+                    actor=email, ip=client_ip(request),
+                    detail={"method": "recovery_code" if body.recovery_code else "totp"})
+    return {"token": token, "user": {"id": uid, "email": email, "name": user.get("name", "Admin")}}
+
+@api_router.get("/auth/2fa/status")
+async def twofa_status(user: dict = Depends(get_current_user)):
+    doc = await db.users.find_one({"email": user["email"]})
+    return {"enabled": bool(doc.get("twofa_enabled"))}
+
+@api_router.post("/auth/2fa/setup/start")
+async def twofa_setup_start(user: dict = Depends(get_current_user)):
+    secret = pyotp.random_base32()
+    uri = pyotp.TOTP(secret).provisioning_uri(name=user["email"], issuer_name="Kinkology")
+    await db.users.update_one({"email": user["email"]}, {"$set": {"twofa_pending_secret": secret}})
+    return {"secret": secret, "otpauth_uri": uri, "qr_code_data_url": qr_data_url(uri)}
+
+@api_router.post("/auth/2fa/setup/verify")
+async def twofa_setup_verify(body: TwoFAVerify, request: Request, user: dict = Depends(get_current_user)):
+    ident = f"{client_ip(request)}:2fa-setup:{user['email']}"
+    await check_lockout(ident)
+    doc = await db.users.find_one({"email": user["email"]})
+    secret = doc.get("twofa_pending_secret")
+    if not secret:
+        raise HTTPException(status_code=400, detail="No pending 2FA setup. Start again.")
+    if not pyotp.TOTP(secret).verify(body.code.strip(), valid_window=1):
+        await record_failure(ident)
+        raise HTTPException(status_code=400, detail="Invalid code — check your authenticator app and try again.")
+    await clear_attempts(ident)
+    codes = make_recovery_codes(10)
+    await db.users.update_one(
+        {"email": user["email"]},
+        {"$set": {"totp_secret": secret, "twofa_enabled": True,
+                  "recovery_codes_hash": [hash_recovery(c) for c in codes]},
+         "$unset": {"twofa_pending_secret": ""}},
+    )
+    await log_event("security", "twofa_enabled", actor=user["email"], ip=client_ip(request))
+    return {"ok": True, "recovery_codes": codes}
+
+@api_router.post("/auth/2fa/disable")
+async def twofa_disable(body: TwoFAVerify, request: Request, user: dict = Depends(get_current_user)):
+    ident = f"{client_ip(request)}:2fa-disable:{user['email']}"
+    await check_lockout(ident)
+    doc = await db.users.find_one({"email": user["email"]})
+    secret = doc.get("totp_secret")
+    ok = bool(secret) and pyotp.TOTP(secret).verify(body.code.strip(), valid_window=1)
+    if not ok and hash_recovery(body.code) in doc.get("recovery_codes_hash", []):
+        ok = True
+    if not ok:
+        await record_failure(ident)
+        raise HTTPException(status_code=400, detail="Invalid code. 2FA not disabled.")
+    await clear_attempts(ident)
+    await db.users.update_one(
+        {"email": user["email"]},
+        {"$set": {"twofa_enabled": False},
+         "$unset": {"totp_secret": "", "recovery_codes_hash": "", "twofa_pending_secret": ""}},
+    )
+    await log_event("security", "twofa_disabled", actor=user["email"], ip=client_ip(request))
+    return {"ok": True}
+
+@api_router.post("/auth/logout")
+async def logout(response: Response):
+    response.delete_cookie("access_token", path="/")
+    return {"ok": True}
+
+@api_router.get("/auth/me")
+async def me(user: dict = Depends(get_current_user)):
+    return {"id": user["id"], "email": user["email"], "name": user.get("name", "Admin")}
+
+# ------------------------------------------------------------------
+# Access code admin routes
+# ------------------------------------------------------------------
+def code_public(doc: dict) -> dict:
+    granted = int(doc.get("granted_seconds", 0))
+    used = int(doc.get("used_seconds", 0))
+    return {
+        "id": str(doc["_id"]),
+        "code": doc["code"],
+        "label": doc.get("label", ""),
+        "granted_seconds": granted,
+        "used_seconds": used,
+        "remaining_seconds": max(0, granted - used),
+        "revoked": bool(doc.get("revoked", False)),
+        "view_only": bool(doc.get("view_only", False)),
+        "created_at": doc.get("created_at"),
+        "last_used_at": doc.get("last_used_at"),
+    }
+
+@api_router.post("/codes")
+async def create_code(body: CodeCreate, user: dict = Depends(get_current_user)):
+    # View-only codes don't need any granted time — they never enter the queue.
+    if not body.view_only and body.minutes <= 0:
+        raise HTTPException(status_code=422, detail="Control codes need at least 1 minute.")
+    code = gen_code()
+    while await db.access_codes.find_one({"code": code}):
+        code = gen_code()
+    doc = {
+        "code": code,
+        "label": body.label.strip(),
+        "granted_seconds": (body.minutes * 60) if not body.view_only else 0,
+        "used_seconds": 0,
+        "revoked": False,
+        "view_only": body.view_only,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "last_used_at": None,
+    }
+    res = await db.access_codes.insert_one(doc)
+    doc["_id"] = res.inserted_id
+    await log_event("security", "code_created", actor=user["email"], target=code,
+                    detail={"minutes": body.minutes, "label": body.label.strip(), "view_only": body.view_only})
+    return code_public(doc)
+
+@api_router.get("/codes")
+async def list_codes(user: dict = Depends(get_current_user)):
+    docs = await db.access_codes.find().sort("created_at", -1).to_list(500)
+    return [code_public(d) for d in docs]
+
+
+@api_router.post("/codes/spectator-link")
+async def spectator_link(user: dict = Depends(get_current_user)):
+    """Return a persistent, sharable view-only URL for the current owner.
+    Reuses the most recent non-revoked view-only code; creates one if none
+    exists. Called by the "Share Spectator Link" button on the admin
+    dashboard so the owner can copy a stream URL to their clipboard in one
+    click without hand-crafting a code."""
+    doc = await db.access_codes.find_one(
+        {"view_only": True, "revoked": {"$ne": True}, "label": "Spectator"},
+        sort=[("created_at", -1)],
+    )
+    if not doc:
+        code = gen_code()
+        while await db.access_codes.find_one({"code": code}):
+            code = gen_code()
+        doc = {
+            "code": code,
+            "label": "Spectator",
+            "granted_seconds": 0,
+            "used_seconds": 0,
+            "revoked": False,
+            "view_only": True,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "last_used_at": None,
+        }
+        res = await db.access_codes.insert_one(doc)
+        doc["_id"] = res.inserted_id
+        await log_event("security", "code_created", actor=user["email"], target=code,
+                        detail={"minutes": 0, "label": "Spectator", "view_only": True, "source": "spectator_link"})
+    return code_public(doc)
+
+def parse_object_id(code_id: str) -> ObjectId:
+    try:
+        return ObjectId(code_id)
+    except (InvalidId, TypeError):
+        raise HTTPException(status_code=404, detail="Not found")
+
+@api_router.post("/codes/{code_id}/revoke")
+async def revoke_code(code_id: str, user: dict = Depends(get_current_user)):
+    doc = await db.access_codes.find_one_and_update(
+        {"_id": parse_object_id(code_id)}, {"$set": {"revoked": True}})
+    if doc:
+        await log_event("security", "code_revoked", actor=user["email"], target=doc.get("code"))
+    return {"ok": True}
+
+@api_router.post("/codes/{code_id}/add-minutes")
+async def add_minutes(code_id: str, body: CodeCreate, user: dict = Depends(get_current_user)):
+    oid = parse_object_id(code_id)
+    await db.access_codes.update_one(
+        {"_id": oid},
+        {"$inc": {"granted_seconds": body.minutes * 60}, "$set": {"revoked": False}},
+    )
+    doc = await db.access_codes.find_one({"_id": oid})
+    await log_event("security", "code_extended", actor=user["email"],
+                    target=doc.get("code") if doc else None, detail={"minutes": body.minutes})
+    return code_public(doc)
+
+@api_router.delete("/codes/{code_id}")
+async def delete_code(code_id: str, user: dict = Depends(get_current_user)):
+    oid = parse_object_id(code_id)
+    doc = await db.access_codes.find_one({"_id": oid})
+    await db.access_codes.delete_one({"_id": oid})
+    if doc:
+        await log_event("security", "code_deleted", actor=user["email"], target=doc.get("code"))
+    return {"ok": True}
+
+# ------------------------------------------------------------------
+# Public: validate a code
+# ------------------------------------------------------------------
+@api_router.get("/access/{code}")
+async def validate_code(code: str, request: Request):
+    ident = f"{client_ip(request)}:access"
+    await check_lockout(ident)
+    doc = await db.access_codes.find_one({"code": code.upper()})
+    if not doc or doc.get("revoked"):
+        await record_failure(ident)
+        return {"valid": False}
+    view_only = bool(doc.get("view_only", False))
+    remaining = max(0, int(doc.get("granted_seconds", 0) - doc.get("used_seconds", 0)))
+    # View-only codes are ALWAYS valid until revoked — they don't have a timer.
+    if not view_only and remaining <= 0:
+        await record_failure(ident)
+        return {"valid": False, "label": doc.get("label", ""), "remaining_seconds": 0}
+    await clear_attempts(ident)
+    return {"valid": True, "label": doc.get("label", ""), "remaining_seconds": remaining, "view_only": view_only}
+
+# ------------------------------------------------------------------
+# Safety settings (owner-set limits enforced server-side)
+# ------------------------------------------------------------------
+async def load_settings() -> dict:
+    doc = await db.settings.find_one({"_id": "global"})
+    if not doc:
+        doc = {"_id": "global", "min_depth": 0, "max_speed": 100, "local_url": "", "public_url": ""}
+        await db.settings.insert_one(doc)
+    toy_length_mm = int(doc.get("toy_length_mm", 0))
+    rail_travel_mm = int(doc.get("rail_travel_mm", 300))
+    manual_max_depth = doc.get("manual_max_depth")
+    manual_max_depth = int(manual_max_depth) if manual_max_depth is not None else None
+    max_depth = manual_max_depth if manual_max_depth is not None else compute_toy_max_depth(toy_length_mm, rail_travel_mm)
+    raw_panels = doc.get("overlay_panels")
+    overlay_panels = raw_panels if isinstance(raw_panels, list) else OVERLAY_PANEL_IDS[:]
+    overlay_layout = doc.get("overlay_layout", "2col") or "2col"
+    return {
+        "min_depth": int(doc.get("min_depth", 0)),
+        "max_speed": int(doc.get("max_speed", 100)),
+        "hr_cutoff": int(doc.get("hr_cutoff", 0)),
+        "owner_name": doc.get("owner_name") or "Owner",
+        "toy_length_mm": toy_length_mm,
+        "rail_travel_mm": rail_travel_mm,
+        "manual_max_depth": manual_max_depth,
+        "max_depth": max_depth,
+        "local_url": doc.get("local_url", "") or "",
+        "public_url": doc.get("public_url", "") or "",
+        "theme": doc.get("theme", "kink") or "kink",
+        "overlay_config": {"panels": overlay_panels, "layout": overlay_layout},
+        "whep_external_url": doc.get("whep_external_url", "") or "",
+    }
+
+VALID_THEMES = {"kink", "neon", "dungeon", "moody"}
+
+@api_router.get("/settings/theme")
+async def get_theme():
+    """Public — every guest reads this on connect to render the same skin."""
+    s = await load_settings()
+    return {"theme": s.get("theme", "kink")}
+
+@api_router.put("/settings/theme")
+async def put_theme(body: dict, user: dict = Depends(get_current_user)):
+    theme = str(body.get("theme", "")).strip().lower()
+    if theme not in VALID_THEMES:
+        raise HTTPException(status_code=400, detail=f"theme must be one of {sorted(VALID_THEMES)}")
+    await db.settings.update_one({"_id": "global"}, {"$set": {"theme": theme}}, upsert=True)
+    await log_event("security", "theme_changed", actor=user["email"], detail={"theme": theme})
+    # Push the change to everyone who's already connected so their UI swaps
+    # instantly instead of on next reload.
+    await hub.broadcast_theme(theme)
+    return {"theme": theme}
+
+@api_router.get("/settings")
+async def get_settings(user: dict = Depends(get_current_user)):
+    return await load_settings()
+
+@api_router.put("/settings")
+async def put_settings(body: SettingsInput, user: dict = Depends(get_current_user)):
+    data = {
+        "min_depth": body.min_depth, "max_speed": body.max_speed, "hr_cutoff": body.hr_cutoff,
+        "toy_length_mm": body.toy_length_mm, "rail_travel_mm": body.rail_travel_mm,
+        "manual_max_depth": body.manual_max_depth,
+    }
+    await db.settings.update_one({"_id": "global"}, {"$set": data}, upsert=True)
+    resolved_max_depth = (
+        body.manual_max_depth if body.manual_max_depth is not None
+        else compute_toy_max_depth(body.toy_length_mm, body.rail_travel_mm)
+    )
+    hub.limits = {
+        "min_depth": body.min_depth, "max_speed": body.max_speed,
+        "max_depth": resolved_max_depth,
+    }
+    hub.hr_cutoff = body.hr_cutoff
+    await log_event("security", "limits_updated", actor=user["email"], detail=data)
+    return await load_settings()
+
+@api_router.put("/settings/urls")
+async def put_url_settings(body: UrlSettingsInput, user: dict = Depends(get_current_user)):
+    data = {"local_url": body.local_url.strip(), "public_url": body.public_url.strip(),
+            "whep_external_url": body.whep_external_url.strip()}
+    await db.settings.update_one({"_id": "global"}, {"$set": data}, upsert=True)
+    await log_event("security", "urls_updated", actor=user["email"], detail=data)
+    return await load_settings()
+
+# ------------------------------------------------------------------
+# Admin session control
+# ------------------------------------------------------------------
+@api_router.get("/session/state")
+async def session_state(user: dict = Depends(get_current_user)):
+    return hub.public_state()
+
+@api_router.post("/session/stop")
+async def session_stop(user: dict = Depends(get_current_user)):
+    await hub.send_to_host({"type": "command", "cmd": "set:speed:0"})
+    await hub.send_to_host({"type": "command", "cmd": "go:menu"})
+    await log_event("security", "emergency_stop", actor=user["email"])
+    return {"ok": True}
+
+@api_router.post("/session/skip")
+async def session_skip(user: dict = Depends(get_current_user)):
+    async with hub.lock:
+        await hub.end_active("skipped_by_admin")
+        await hub.promote()
+        await hub.broadcast()
+    await log_event("security", "session_skipped", actor=user["email"])
+    return {"ok": True}
+
+@api_router.post("/session/toys/lock")
+async def toys_lock(user: dict = Depends(get_current_user)):
+    """Kill switch: immediately stop toys on the owner's browser AND block
+    every subsequent guest toy command until the owner unlocks."""
+    async with hub.lock:
+        hub.toys_locked = True
+        hub.toys_pattern = None
+        await hub.send_to_host({"type": "toy_command", "cmd": "toy:stop"})
+        await hub.send_to_host({"type": "toys_lock", "locked": True})
+        await hub.broadcast()
+    await log_event("security", "toys_locked", actor=user["email"])
+    return {"ok": True, "locked": True}
+
+
+@api_router.post("/session/toys/unlock")
+async def toys_unlock(user: dict = Depends(get_current_user)):
+    async with hub.lock:
+        hub.toys_locked = False
+        await hub.send_to_host({"type": "toys_lock", "locked": False})
+        await hub.broadcast()
+    await log_event("security", "toys_unlocked", actor=user["email"])
+    return {"ok": True, "locked": False}
+
+
+@api_router.delete("/session/chat")
+async def clear_chat(user: dict = Depends(get_current_user)):
+    async with hub.lock:
+        hub.chat_msgs = []
+        frame = {"type": "chat_cleared"}
+        await hub.send_to_host(frame)
+        for c in list(hub.clients.values()):
+            await hub._send(c["ws"], frame)
+        await hub.push_chat_overlay(frame)
+    return {"ok": True}
+
+# ------------------------------------------------------------------
+# WebSockets
+# ------------------------------------------------------------------
+@app.websocket("/api/ws/host")
+async def ws_host(ws: WebSocket):
+    token = ws.query_params.get("token", "")
+    try:
+        decode_token(token)
+    except Exception:
+        await ws.close(code=4401)
+        return
+    await ws.accept()
+    hub.host_ws = ws
+    await log_event("session", "device_connected", actor="owner")
+    # Sync current lock state and chat history to the owner's newly-opened WS.
+    await hub._send(ws, {"type": "toys_lock", "locked": hub.toys_locked})
+    await hub._send(ws, {"type": "chat_history", "messages": hub.chat_msgs})
+    await hub.broadcast()
+    await hub.broadcast_presence()
+    try:
+        while True:
+            data = await ws.receive_json()
+            t = data.get("type")
+            if t == "device_state":
+                hub.device_state = str(data.get("state", ""))[:200]
+            elif t == "ble_status":
+                if not data.get("connected"):
+                    hub.device_state = "disconnected"
+            elif t == "owner_telemetry":
+                try:
+                    sp = int(data.get("speed"))
+                except (TypeError, ValueError):
+                    sp = None
+                changed = False
+                if sp is not None:
+                    sp = max(0, min(100, sp))
+                    hub.telemetry["speed"] = sp
+                    hub._update_motion(sp)
+                    changed = True
+                for field in ("stroke", "depth", "sensation"):
+                    if field in data:
+                        try:
+                            val = max(0, min(100, int(data.get(field))))
+                        except (TypeError, ValueError):
+                            continue
+                        hub.telemetry[field] = val
+                        changed = True
+                if "hr_target" in data:
+                    try:
+                        hub.hr_target = max(0, min(240, int(data.get("hr_target"))))
+                        changed = True
+                    except (TypeError, ValueError):
+                        pass
+                if "hr_sync_enabled" in data:
+                    hub.hr_sync_enabled = bool(data.get("hr_sync_enabled"))
+                    changed = True
+                if changed:
+                    await hub.push_telemetry()
+            elif t == "toys_status":
+                hub.toys_available = bool(data.get("available"))
+                hub.toys_pattern = (data.get("pattern") or None)
+                await hub.broadcast()
+            elif t == "chat":
+                async with hub.lock:
+                    hub.typing_at.pop("owner", None)
+                    await hub.handle_owner_chat(str(data.get("text", "")))
+                await hub.broadcast_presence()
+            elif t == "typing":
+                async with hub.lock:
+                    await hub.mark_typing("owner")
+            elif t == "reaction":
+                await hub.broadcast_reaction(None, str(data.get("emoji", "")))
+            elif t == "chat_react":
+                await hub.toggle_chat_reaction(str(data.get("msg_id", "")),
+                                               str(data.get("emoji", "")),
+                                               hub.owner_name)
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        pass
+    finally:
+        if hub.host_ws is ws:
+            hub.host_ws = None
+            hub.toys_available = False
+            hub.toys_pattern = None
+            hub.typing_at.pop("owner", None)
+            await log_event("session", "device_disconnected", actor="owner")
+        await hub.broadcast()
+        await hub.broadcast_presence()
+
+@app.websocket("/api/ws/control/{code}")
+async def ws_control(ws: WebSocket, code: str):
+    code = code.upper()
+    doc = await db.access_codes.find_one({"code": code})
+    view_only = bool(doc.get("view_only", False)) if doc else False
+    remaining = await hub.code_remaining(code)
+    # Control codes: reject if expired/revoked. View-only codes: only reject on
+    # revoke — they don't have a time budget.
+    if not doc or doc.get("revoked") or (not view_only and remaining <= 0):
+        await ws.accept()
+        await ws.send_json({"type": "rejected", "reason": "invalid_or_expired"})
+        await ws.close()
+        return
+    await ws.accept()
+    cid = secrets.token_hex(8)
+    owner_label = doc.get("label")
+    label = owner_label or code
+    async with hub.lock:
+        await hub.add_client(cid, ws, code, label, auto_label=not owner_label, view_only=view_only)
+        await hub.broadcast()
+    # Seed the newly-joined guest with the current chat history so they don't
+    # arrive to an empty pane while everyone else is mid-conversation.
+    await hub._send(ws, {"type": "chat_history", "messages": hub.chat_msgs})
+    await hub._send(ws, hub._presence_payload())
+    try:
+        while True:
+            data = await ws.receive_json()
+            t = data.get("type")
+            # View-only + time-expired clients still receive state + chat, but
+            # any control/toy command is silently dropped. Presence & chat &
+            # typing still flow so they can watch and talk.
+            client = hub.clients.get(cid)
+            allow_control = bool(client) and not client.get("view_only") and not client.get("expired")
+            if t == "command" and allow_control:
+                async with hub.lock:
+                    await hub.handle_command(cid, str(data.get("cmd", "")))
+            elif t == "toy_command" and allow_control:
+                async with hub.lock:
+                    await hub.handle_toy_command(cid, str(data.get("cmd", "")))
+            elif t == "chat":
+                async with hub.lock:
+                    hub.typing_at.pop(cid, None)
+                    await hub.handle_guest_chat(cid, str(data.get("text", "")))
+                await hub.broadcast_presence()
+            elif t == "typing":
+                async with hub.lock:
+                    await hub.mark_typing(cid)
+            elif t == "reaction":
+                await hub.broadcast_reaction(cid, str(data.get("emoji", "")))
+            elif t == "chat_react":
+                client = hub.clients.get(cid)
+                author = "Guest" if not client else ("Guest" if client.get("auto_label") else client["label"])
+                await hub.toggle_chat_reaction(str(data.get("msg_id", "")),
+                                               str(data.get("emoji", "")), author)
+            elif t == "set_nickname":
+                async with hub.lock:
+                    await hub.set_client_nickname(cid, str(data.get("name", "")))
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        pass
+    finally:
+        async with hub.lock:
+            await hub.remove_client(cid)
+            await hub.broadcast()
+
+@app.websocket("/api/ws/overlay")
+async def ws_overlay(ws: WebSocket):
+    await ws.accept()
+    hub.overlay_ws.add(ws)
+    await hub._send(ws, hub.telemetry_frame())
+    try:
+        while True:
+            await ws.receive_text()
+    except Exception:
+        pass
+    finally:
+        hub.overlay_ws.discard(ws)
+
+@app.websocket("/api/ws/chat-overlay")
+async def ws_chat_overlay(ws: WebSocket):
+    """Public, read-only chat feed for OBS browser sources — same shape as
+    /api/ws/overlay but for chat instead of telemetry. No auth/token and no
+    client id: this connection can only receive, never send or post, so it
+    doesn't need the guest-code rate limiting the real chat clients get."""
+    await ws.accept()
+    hub.chat_overlay_ws.add(ws)
+    await hub._send(ws, {"type": "chat_history", "messages": hub.chat_msgs})
+    try:
+        while True:
+            await ws.receive_text()
+    except Exception:
+        pass
+    finally:
+        hub.chat_overlay_ws.discard(ws)
+
+@app.websocket("/api/ws/hr")
+async def ws_hr(ws: WebSocket):
+    token = ws.query_params.get("token", "")
+    try:
+        decode_token(token)
+    except Exception:
+        await ws.close(code=4401)
+        return
+    await ws.accept()
+    hub.hr["connected"] = True
+    await hub.push_telemetry()
+    try:
+        while True:
+            data = await ws.receive_json()
+            if data.get("type") == "hr":
+                try:
+                    bpm = int(data.get("bpm", 0))
+                except (TypeError, ValueError):
+                    bpm = 0
+                hub.hr["bpm"] = max(0, min(300, bpm))
+                hub.hr["connected"] = True
+                await hub.evaluate_hr_cutoff()
+                await hub.push_telemetry()
+            elif data.get("type") == "hr_status":
+                hub.hr["connected"] = bool(data.get("connected"))
+                if not hub.hr["connected"]:
+                    hub.hr["bpm"] = 0
+                    # NOTE: intentionally do NOT clear hr_over here. If the cutoff
+                    # was tripped, the device stays safely stopped while the strap
+                    # is disconnected (no live BPM to confirm it's safe to resume).
+                    # hr_over only clears via evaluate_hr_cutoff() once a real BPM
+                    # reading below the cutoff comes back in, which also fires the
+                    # actual go:strokeEngine/set:speed resume commands. Clearing it
+                    # here left hr_over permanently False with the device parked at
+                    # speed 0 and no way to ever trigger the resume path again.
+                await hub.push_telemetry()
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        pass
+    finally:
+        hub.hr["connected"] = False
+        hub.hr["bpm"] = 0
+        hub.hr_over = False
+        await hub.push_telemetry()
+
+@api_router.get("/overlay/state")
+async def overlay_state():
+    return hub.telemetry_frame()
+
+@api_router.get("/overlay/config")
+async def get_overlay_config():
+    """Public — the overlay page reads this without auth (it has no login)."""
+    s = await load_settings()
+    return s["overlay_config"]
+
+@api_router.put("/overlay/config")
+async def put_overlay_config(body: OverlayConfigInput, user: dict = Depends(get_current_user)):
+    # Sanitise: keep only known panel ids, preserve order
+    known = set(OVERLAY_PANEL_IDS)
+    panels = [p for p in body.panels if p in known]
+    layout = body.layout if body.layout in ("1col", "2col") else "2col"
+    await db.settings.update_one(
+        {"_id": "global"},
+        {"$set": {"overlay_panels": panels, "overlay_layout": layout}},
+        upsert=True,
+    )
+    await log_event("security", "overlay_config_updated", actor=user["email"],
+                    detail={"panels": panels, "layout": layout})
+    return {"panels": panels, "layout": layout}
+
+# ------------------------------------------------------------------
+# Audit & activity log routes
+# ------------------------------------------------------------------
+def _log_query(category, q, start, end):
+    query = {}
+    if category in ("security", "session"):
+        query["category"] = category
+    if start or end:
+        ts = {}
+        if start:
+            ts["$gte"] = start
+        if end:
+            ts["$lte"] = end
+        query["ts"] = ts
+    if q:
+        rx = {"$regex": re.escape(q), "$options": "i"}
+        query["$or"] = [{"action": rx}, {"actor": rx}, {"target": rx}]
+    return query
+
+@api_router.get("/logs")
+async def list_logs(
+    user: dict = Depends(get_current_user),
+    category: Optional[str] = None,
+    q: Optional[str] = None,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    limit: int = 100,
+    skip: int = 0,
+):
+    limit = max(1, min(500, limit))
+    query = _log_query(category, q, start, end)
+    total = await db.audit_logs.count_documents(query)
+    docs = await db.audit_logs.find(query).sort("ts", -1).skip(max(0, skip)).limit(limit).to_list(limit)
+    return {"items": [log_public(d) for d in docs], "total": total, "limit": limit, "skip": skip}
+
+@api_router.delete("/logs")
+async def clear_logs(user: dict = Depends(get_current_user)):
+    res = await db.audit_logs.delete_many({})
+    await log_event("security", "logs_cleared", actor=user["email"],
+                    detail={"deleted": res.deleted_count})
+    return {"ok": True, "deleted": res.deleted_count}
+
+@api_router.get("/logs/export")
+async def export_logs(
+    user: dict = Depends(get_current_user),
+    format: str = "csv",
+    category: Optional[str] = None,
+    q: Optional[str] = None,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+):
+    query = _log_query(category, q, start, end)
+    docs = await db.audit_logs.find(query).sort("ts", -1).to_list(100000)
+    items = [log_public(d) for d in docs]
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    if format == "json":
+        return Response(
+            content=json.dumps(items, indent=2),
+            media_type="application/json",
+            headers={"Content-Disposition": f'attachment; filename="ossm-audit-{stamp}.json"'},
+        )
+    buf = StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["timestamp", "category", "action", "actor", "target", "detail", "ip"])
+    for it in items:
+        detail = it.get("detail")
+        detail = json.dumps(detail) if isinstance(detail, (dict, list)) else (detail or "")
+        writer.writerow([it.get("ts", ""), it.get("category", ""), it.get("action", ""),
+                         it.get("actor", ""), it.get("target", "") or "", detail, it.get("ip", "") or ""])
+    return Response(
+        content=buf.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="ossm-audit-{stamp}.csv"'},
+    )
+
+@api_router.get("/")
+async def root():
+    return {"message": "Kinkology API"}
+
+# ------------------------------------------------------------------
+# OBS/WHIP publish token — optional bearer secret that OBS must send
+# in `Authorization: Bearer <token>` before it's allowed to publish.
+# ------------------------------------------------------------------
+async def _get_stream_publish_token() -> str:
+    doc = await db.settings.find_one({"_id": "global"}) or {}
+    return (doc.get("stream_token") or "").strip()
+
+set_publish_token_provider(_get_stream_publish_token)
+
+
+class StreamTokenInput(BaseModel):
+    token: Optional[str] = None  # None => server generates one
+
+
+@api_router.get("/stream/token")
+async def get_stream_token(user: dict = Depends(get_current_user)):
+    token = await _get_stream_publish_token()
+    return {"token": token, "enabled": bool(token)}
+
+
+@api_router.post("/stream/token")
+async def set_stream_token(body: StreamTokenInput, user: dict = Depends(get_current_user)):
+    token = (body.token or "").strip() if body.token is not None else secrets.token_urlsafe(24)
+    if not token:
+        raise HTTPException(status_code=400, detail="Token cannot be empty. Use DELETE to disable auth.")
+    if len(token) < 8:
+        raise HTTPException(status_code=400, detail="Token must be at least 8 characters.")
+    await db.settings.update_one({"_id": "global"}, {"$set": {"stream_token": token}}, upsert=True)
+    await log_event("security", "stream_token_set", actor=user["email"])
+    return {"token": token, "enabled": True}
+
+
+@api_router.delete("/stream/token")
+async def clear_stream_token(user: dict = Depends(get_current_user)):
+    await db.settings.update_one({"_id": "global"}, {"$unset": {"stream_token": ""}}, upsert=True)
+    await log_event("security", "stream_token_cleared", actor=user["email"])
+    return {"token": "", "enabled": False}
+
+
+# ------------------------------------------------------------------
+# Owner chat display name — the name the owner appears under in chat,
+# reactions, and the "is typing…" indicator. Defaults to "Owner".
+# ------------------------------------------------------------------
+class OwnerNameInput(BaseModel):
+    name: str = Field(min_length=2, max_length=24)
+
+
+@api_router.get("/stream/owner-name")
+async def get_owner_name(user: dict = Depends(get_current_user)):
+    return {"name": hub.owner_name}
+
+
+@api_router.put("/stream/owner-name")
+async def put_owner_name(body: OwnerNameInput, user: dict = Depends(get_current_user)):
+    cleaned = await hub.set_owner_name(body.name)
+    if cleaned is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Name must be 2-24 characters (letters, numbers, spaces, - . ! ? only).",
+        )
+    await db.settings.update_one({"_id": "global"}, {"$set": {"owner_name": cleaned}}, upsert=True)
+    await log_event("security", "owner_name_changed", actor=user["email"])
+    return {"name": cleaned}
+
+
+api_router.include_router(stream_router)
+
+
+@api_router.get("/stream/ice-servers")
+async def get_ice_servers():
+    """Public endpoint: returns a fresh set of ICE servers the browser should
+    plug into `new RTCPeerConnection({iceServers:[...]})` before starting the
+    WHEP handshake. Includes public STUN plus the self-hosted TURN server
+    (STREAM_TURN_URL) when configured."""
+    static = [
+        {"urls": ["stun:stun.l.google.com:19302", "stun:stun.cloudflare.com:3478"]},
+    ]
+    self_hosted_turn_url = (os.environ.get("STREAM_TURN_URL") or "").strip()
+    if self_hosted_turn_url:
+        static.append({
+            "urls": [self_hosted_turn_url],
+            "username": os.environ.get("STREAM_TURN_USERNAME") or None,
+            "credential": os.environ.get("STREAM_TURN_PASSWORD") or None,
+        })
+    servers = static
+    # Optional external WHEP endpoint (e.g. a MediaMTX server). When set, the
+    # viewer POSTs its SDP offer here instead of the built-in /api/whep aiortc
+    # relay. Blank = use the built-in relay.
+    s = await load_settings()
+    return {"iceServers": servers, "whepUrl": s.get("whep_external_url", "")}
+
+
+app.include_router(api_router)
+
+# CORS: default to same-origin only (the documented Caddy/Docker setup is single-origin).
+# Set CORS_ORIGINS to a comma-separated allowlist to enable credentialed cross-origin
+# requests. A literal '*' is allowed but forces credentials OFF (browsers reject '*'
+# with credentials, and reflecting arbitrary origins with credentials is a CSRF risk).
+_cors_env = os.environ.get('CORS_ORIGINS', '').strip()
+if _cors_env == '*':
+    _cors_origins, _cors_credentials = ['*'], False
+elif _cors_env:
+    _cors_origins, _cors_credentials = [o.strip() for o in _cors_env.split(',') if o.strip()], True
+else:
+    _cors_origins, _cors_credentials = [], True
+app.add_middleware(
+    CORSMiddleware,
+    allow_credentials=_cors_credentials,
+    allow_origins=_cors_origins,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+@app.on_event("startup")
+async def startup():
+    await db.users.create_index("email", unique=True)
+    await db.access_codes.create_index("code", unique=True)
+    await db.audit_logs.create_index([("ts", -1)])
+    await db.audit_logs.create_index("category")
+    await db.login_attempts.create_index("identifier", unique=True)
+    s = await load_settings()
+    hub.limits = {"min_depth": s["min_depth"], "max_speed": s["max_speed"], "max_depth": s["max_depth"]}
+    hub.hr_cutoff = s["hr_cutoff"]
+    hub.owner_name = s.get("owner_name") or "Owner"
+    # Optional pre-seed for dev/preview when ADMIN_EMAIL + ADMIN_PASSWORD are set.
+    # In self-hosted Docker these are left unset, so the owner creates the admin
+    # account via the first-run setup flow (/api/setup).
+    admin_email = os.environ.get("ADMIN_EMAIL")
+    admin_password = os.environ.get("ADMIN_PASSWORD")
+    if admin_email and admin_password:
+        admin_email = admin_email.lower()
+        existing = await db.users.find_one({"email": admin_email})
+        if existing is None:
+            await db.users.insert_one({
+                "email": admin_email, "password_hash": hash_password(admin_password),
+                "name": "Admin", "role": "admin", "created_at": datetime.now(timezone.utc).isoformat(),
+            })
+            logger.info("Seeded admin user")
+        elif not verify_password(admin_password, existing["password_hash"]):
+            await db.users.update_one({"email": admin_email},
+                                      {"$set": {"password_hash": hash_password(admin_password)}})
+    asyncio.create_task(ticker_loop())
+
+@app.on_event("shutdown")
+async def shutdown_db_client():
+    await stream_shutdown()
+    client.close()
