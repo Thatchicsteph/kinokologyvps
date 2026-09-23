@@ -620,7 +620,7 @@ export default function AdminDashboard() {
     "obs-stream": (
       <div key="obs-stream-panel">
         <div className="relative" data-testid="obs-stream-with-reactions">
-          <ObsStream canPublish />
+          <ObsStream />
           <FloatingReactions reactions={reactions} />
         </div>
         <ReactionBar onReact={sendReaction} disabled={!ble.wsConnected} />
