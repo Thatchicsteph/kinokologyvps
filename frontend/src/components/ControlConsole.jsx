@@ -1,7 +1,8 @@
 import React, { useEffect, useRef, useState } from "react";
 import * as SliderPrimitive from "@radix-ui/react-slider";
-import { Gauge, Ruler, Waves, Move3d, Power, Square, Zap, Lock } from "lucide-react";
+import { Gauge, Ruler, Waves, Move3d, Power, Square, Zap, Lock, Bookmark, Trash2 } from "lucide-react";
 import { PATTERNS, cmd } from "@/lib/ossm";
+import { loadPresets, savePreset, deletePreset } from "@/lib/guestPresets";
 
 const ICONS = { speed: Gauge, depth: Move3d, stroke: Ruler, sensation: Waves };
 
@@ -81,6 +82,9 @@ export function ControlConsole({ onCommand, disabled = false, autoStart = false,
     sensation: initialState?.sensation ?? 50,
   }));
   const [pattern, setPattern] = useState(initialState?.pattern ?? 0);
+  const [presets, setPresets] = useState(() => loadPresets());
+  const [presetName, setPresetName] = useState("");
+  const [presetErr, setPresetErr] = useState("");
   const throttle = useRef({});
   const progRef = useRef(null);
   const stateRef = useRef(state);
@@ -160,6 +164,48 @@ export function ControlConsole({ onCommand, disabled = false, autoStart = false,
   const selectPattern = (idx) => {
     setPattern(idx);
     onCommand(cmd.pattern(idx));
+  };
+
+  // --- Presets: save the current settings, recall a saved snapshot ----------
+  const saveCurrentPreset = () => {
+    setPresetErr("");
+    const { presets: next, error } = savePreset(presetName, {
+      speed: stateRef.current.speed,
+      depth: stateRef.current.depth,
+      stroke: stateRef.current.stroke,
+      sensation: stateRef.current.sensation,
+      pattern,
+    });
+    if (error) { setPresetErr(error); return; }
+    setPresets(next);
+    setPresetName("");
+  };
+
+  const removePreset = (id) => setPresets(deletePreset(id));
+
+  // Recall applies a preset's values through the SAME clamp + command path a
+  // manual slider move uses, so owner safety limits (min/max depth, toy cap,
+  // stroke floor) are always re-enforced — a stale preset can never exceed
+  // limits the owner has since tightened. Any running auto-program is stopped.
+  const recallPreset = (preset) => {
+    if (disabled || !preset?.values) return;
+    if (activeProgram) stopProgram();
+    const v = preset.values;
+    const depth = clampDepth(v.depth);
+    const stroke = clampStroke(v.stroke, depth);
+    const speed = clampSpeed(v.speed);
+    const sensation = Math.min(100, Math.max(0, Math.round(Number(v.sensation) || 0)));
+    const pat = Number.isFinite(Number(v.pattern)) ? Number(v.pattern) : pattern;
+
+    setState((s) => ({ ...s, depth, stroke, sensation, speed }));
+    setPattern(pat);
+
+    // Push to the device only while running, mirroring setParam's behaviour.
+    onCommand(cmd.pattern(pat));
+    onCommand(cmd.depth(depth));
+    onCommand(cmd.stroke(stroke));
+    onCommand(cmd.sensation(sensation));
+    if (running) onCommand(cmd.speed(speed));
   };
 
   const stopAll = () => {
@@ -274,6 +320,69 @@ export function ControlConsole({ onCommand, disabled = false, autoStart = false,
             </button>
           ))}
         </div>
+      </div>
+
+      <div className={disabled ? "opacity-40 pointer-events-none" : ""} data-testid="presets-section">
+        <span className="font-display text-xs tracking-[0.15em] text-[var(--kink-text-2)] flex items-center gap-2 mb-3">
+          <Bookmark size={14} className="text-[var(--kink-purple)]" /> MY PRESETS
+        </span>
+        {presets.length > 0 && (
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 mb-3">
+            {presets.map((p) => (
+              <div
+                key={p.id}
+                className="group relative border border-[var(--kink-overlay)] hover:border-[var(--kink-purple)]/40 transition-colors"
+              >
+                <button
+                  onClick={() => recallPreset(p)}
+                  data-testid={`preset-recall-${p.id}`}
+                  title={`Recall "${p.name}" — speed ${p.values.speed}, depth ${p.values.depth}, stroke ${p.values.stroke}, sensation ${p.values.sensation}`}
+                  className="w-full text-left px-3 py-2.5 pr-8 text-sm text-[var(--kink-text-2)] hover:text-white"
+                >
+                  <span className="block font-medium truncate">{p.name}</span>
+                  <span className="block font-mono-data text-[10px] text-[var(--kink-muted)] mt-0.5">
+                    S{p.values.speed} · D{p.values.depth} · St{p.values.stroke}
+                  </span>
+                </button>
+                <button
+                  onClick={() => removePreset(p.id)}
+                  data-testid={`preset-delete-${p.id}`}
+                  title="Delete preset"
+                  className="absolute top-1.5 right-1.5 p-1 text-[var(--kink-muted)] hover:text-[var(--kink-red,#ff5c73)] opacity-0 group-hover:opacity-100 transition-opacity"
+                >
+                  <Trash2 size={13} />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+        <div className="flex items-center gap-2">
+          <input
+            type="text"
+            value={presetName}
+            onChange={(e) => { setPresetName(e.target.value); setPresetErr(""); }}
+            onKeyDown={(e) => { if (e.key === "Enter") saveCurrentPreset(); }}
+            placeholder="Name this preset…"
+            maxLength={40}
+            data-testid="preset-name-input"
+            className="flex-1 bg-[var(--kink-base)] border border-[var(--kink-overlay)] px-3 py-2 text-sm text-white placeholder:text-[var(--kink-muted)] focus:border-[var(--kink-purple)]/60 focus:outline-none"
+          />
+          <button
+            onClick={saveCurrentPreset}
+            data-testid="preset-save"
+            className="px-3 py-2 border border-[var(--kink-purple)]/60 text-[var(--kink-purple)] text-sm hover:bg-[var(--kink-purple)]/[0.08] transition-colors whitespace-nowrap"
+          >
+            Save current
+          </button>
+        </div>
+        {presetErr && (
+          <p className="font-mono-data text-[11px] text-[var(--kink-red,#ff5c73)] mt-2">{presetErr}</p>
+        )}
+        {presets.length === 0 && !presetErr && (
+          <p className="font-mono-data text-[11px] text-[var(--kink-muted)] mt-2">
+            Set the sliders how you like, name it, and save — recall it any time. Saved in this browser only.
+          </p>
+        )}
       </div>
 
       <div className={disabled ? "opacity-40 pointer-events-none" : ""}>
