@@ -1,5 +1,8 @@
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
+from slowapi import Limiter
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -51,6 +54,47 @@ JWT_ALGORITHM = "HS256"
 
 app = FastAPI(title="Kinkology API")
 api_router = APIRouter(prefix="/api")
+
+
+# ------------------------------------------------------------------
+# Per-IP rate limiting (slowapi). Keys on the real client IP behind Caddy
+# via X-Forwarded-For, falling back to the socket address. Limits are opt-in
+# per route via @limiter.limit(...) — see the public auth/access endpoints.
+# ------------------------------------------------------------------
+def _rate_limit_key(request: Request) -> str:
+    xff = request.headers.get("x-forwarded-for")
+    if xff:
+        return xff.split(",")[0].strip()
+    return get_remote_address(request)
+
+
+limiter = Limiter(key_func=_rate_limit_key, default_limits=[])
+app.state.limiter = limiter
+
+
+@app.exception_handler(RateLimitExceeded)
+async def _rate_limit_handler(request: Request, exc: RateLimitExceeded):
+    return JSONResponse(
+        status_code=429,
+        content={"detail": "Too many requests. Please slow down and try again shortly."},
+    )
+
+
+@app.exception_handler(Exception)
+async def _unhandled_exception_handler(request: Request, exc: Exception):
+    """Catch-all for unhandled exceptions. Logs the full traceback server-side
+    (so 'Something went wrong' failures are diagnosable) and returns a clean,
+    generic 500 to the client without leaking internals. HTTPException and
+    RateLimitExceeded are handled by their own handlers and never reach here."""
+    logger.exception(
+        "unhandled exception on %s %s: %s",
+        request.method, request.url.path, exc,
+    )
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "An internal error occurred. Please try again."},
+    )
+
 
 # ------------------------------------------------------------------
 # OSSM BLE command validation (mirrors firmware regex)
@@ -1179,6 +1223,7 @@ async def setup_admin(body: SetupInput, request: Request, response: Response):
     return {"token": token, "user": {"id": uid, "email": email, "name": "Admin"}}
 
 @api_router.post("/auth/login")
+@limiter.limit("10/minute")
 async def login(body: LoginInput, request: Request, response: Response):
     email = body.email.strip().lower()
     ident = f"{client_ip(request)}:login:{email}"
@@ -1199,6 +1244,7 @@ async def login(body: LoginInput, request: Request, response: Response):
     return {"token": token, "user": {"id": uid, "email": email, "name": user.get("name", "Admin")}}
 
 @api_router.post("/auth/2fa/login")
+@limiter.limit("10/minute")
 async def twofa_login(body: TwoFALogin, request: Request, response: Response):
     try:
         payload = decode_token(body.mfa_token)
@@ -1417,6 +1463,7 @@ async def delete_code(code_id: str, user: dict = Depends(get_current_user)):
 # Public: validate a code
 # ------------------------------------------------------------------
 @api_router.get("/access/{code}")
+@limiter.limit("30/minute")
 async def validate_code(code: str, request: Request):
     ident = f"{client_ip(request)}:access"
     await check_lockout(ident)
