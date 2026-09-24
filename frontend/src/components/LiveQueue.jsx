@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { fmtTime } from "@/lib/api";
-import { MicOff, Mic, ChevronUp, ChevronDown, Plus } from "lucide-react";
+import { MicOff, Mic, ChevronUp, ChevronDown, Plus, Minus } from "lucide-react";
 
 export function LiveQueue({ active, queue, you, onMute, onMove, onExtend }) {
   const [extendMins, setExtendMins] = useState(5);
@@ -76,32 +76,39 @@ export function LiveQueue({ active, queue, you, onMute, onMove, onExtend }) {
                 </button>
               </div>
             )}
-            {/* Custom +time on the active turn */}
+            {/* Adjust time on the active turn (positive adds, negative reduces) */}
             {r.isActive && onExtend && (
               <div className="flex items-center" data-testid="queue-extend">
                 <input
                   type="number"
-                  min={1}
+                  min={-120}
                   max={120}
                   value={extendMins}
                   onChange={(e) => {
-                    const v = parseInt(e.target.value, 10);
-                    setExtendMins(Number.isNaN(v) ? "" : Math.max(1, Math.min(120, v)));
+                    const raw = e.target.value;
+                    if (raw === "" || raw === "-") { setExtendMins(raw); return; }
+                    const v = parseInt(raw, 10);
+                    setExtendMins(Number.isNaN(v) ? "" : Math.max(-120, Math.min(120, v)));
                   }}
                   onKeyDown={(e) => { if (e.key === "Enter" && extendMins) onExtend(extendMins); }}
                   data-testid="queue-extend-input"
-                  aria-label="Minutes to add"
-                  className="w-11 bg-[var(--kink-base)] border border-[var(--kink-overlay)] px-1.5 py-1 text-center font-mono-data text-[11px] text-white focus:border-[var(--kink-purple)]/60 focus:outline-none"
+                  aria-label="Minutes to add or subtract"
+                  className="w-12 bg-[var(--kink-base)] border border-[var(--kink-overlay)] px-1.5 py-1 text-center font-mono-data text-[11px] text-white focus:border-[var(--kink-purple)]/60 focus:outline-none"
                 />
                 <button
                   type="button"
-                  onClick={() => extendMins && onExtend(extendMins)}
-                  disabled={!extendMins}
+                  onClick={() => extendMins && onExtend(Number(extendMins))}
+                  disabled={!extendMins || Number(extendMins) === 0}
                   data-testid="queue-extend-apply"
-                  title={`Add ${extendMins || 0} minute(s) to this turn`}
+                  title={Number(extendMins) < 0
+                    ? `Remove ${Math.abs(Number(extendMins))} minute(s) from this turn`
+                    : `Add ${Number(extendMins) || 0} minute(s) to this turn`}
                   className="flex items-center gap-0.5 px-1.5 py-1 text-[var(--kink-muted)] hover:text-[var(--kink-purple)] disabled:opacity-30 transition-colors"
                 >
-                  <Plus size={12} /><span className="font-mono-data text-[11px]">m</span>
+                  {Number(extendMins) < 0
+                    ? <Minus size={12} />
+                    : <Plus size={12} />}
+                  <span className="font-mono-data text-[11px]">m</span>
                 </button>
               </div>
             )}
