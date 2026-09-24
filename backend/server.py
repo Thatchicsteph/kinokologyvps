@@ -799,6 +799,55 @@ async def clear_chat(user: dict = Depends(get_current_user)):
     return {"ok": True}
 
 # ------------------------------------------------------------------
+# Session recordings (telemetry playback)
+# ------------------------------------------------------------------
+def _recording_summary(doc: dict) -> dict:
+    """List view of a recording — metadata only, no heavy track array."""
+    return {
+        "id": str(doc["_id"]),
+        "created_at": doc.get("created_at"),
+        "label": doc.get("label", "Guest"),
+        "reason": doc.get("reason", ""),
+        "duration_seconds": doc.get("duration_seconds", 0),
+        "frame_count": doc.get("frame_count", 0),
+    }
+
+@api_router.get("/recordings")
+async def list_recordings(user: dict = Depends(get_current_user)):
+    docs = await db.recordings.find({}, {"track": 0}).sort("created_at", -1).to_list(length=200)
+    return [_recording_summary(d) for d in docs]
+
+@api_router.post("/recordings/{rec_id}/replay")
+async def replay_recording(rec_id: str, body: dict = None, user: dict = Depends(get_current_user)):
+    doc = await db.recordings.find_one({"_id": parse_object_id(rec_id)})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Recording not found.")
+    if hub.active_id is not None:
+        raise HTTPException(status_code=409, detail="A guest is currently active — end their turn before replaying.")
+    speed_mult = 1.0
+    if isinstance(body, dict):
+        try:
+            speed_mult = float(body.get("speed", 1.0))
+        except (TypeError, ValueError):
+            speed_mult = 1.0
+    # Fire-and-forget: the replay drives the device over time; don't block the
+    # HTTP request for the whole playback.
+    asyncio.create_task(hub.replay_recording(doc.get("track", []), speed_mult))
+    await log_event("session", "recording_replayed", actor=user["email"], target=rec_id)
+    return {"ok": True}
+
+@api_router.post("/recordings/replay/stop")
+async def stop_replay(user: dict = Depends(get_current_user)):
+    hub.stop_replay()
+    return {"ok": True}
+
+@api_router.delete("/recordings/{rec_id}")
+async def delete_recording(rec_id: str, user: dict = Depends(get_current_user)):
+    await db.recordings.delete_one({"_id": parse_object_id(rec_id)})
+    await log_event("session", "recording_deleted", actor=user["email"], target=rec_id)
+    return {"ok": True}
+
+# ------------------------------------------------------------------
 # WebSockets
 # ------------------------------------------------------------------
 @app.websocket("/api/ws/host")

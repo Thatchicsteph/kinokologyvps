@@ -117,6 +117,15 @@ class Hub:
         # reconnect with the same code but a new WS/cid can cancel the timer.
         # Value: asyncio.Task running the grace coroutine.
         self.disconnect_grace: Dict[str, asyncio.Task] = {}
+        # Session recording: a timestamped telemetry track for the current turn.
+        # Each frame is {t: seconds-since-start, speed, depth, stroke, sensation,
+        # pattern}. Captured once per tick while a turn runs, saved to the
+        # `recordings` collection when the turn ends, then replayable by the
+        # owner. Reset per turn in _init_stats.
+        self._rec_track: List[dict] = []
+        self._rec_start: Optional[float] = None
+        # Guard so a replay can't be started twice concurrently.
+        self._replaying: bool = False
         self.lock = asyncio.Lock()
 
     TYPING_TTL_S = 4.0
@@ -313,6 +322,9 @@ class Hub:
             "granted_seconds": self.active_remaining_start,
             "code": code,
         }
+        # Start a fresh recording track for this turn.
+        self._rec_track = []
+        self._rec_start = time.monotonic()
 
     def _record_speed_sample(self) -> None:
         """Log the current speed onto the active guest's recap accumulator.
@@ -324,6 +336,20 @@ class Hub:
         if stats is None:
             return
         stats["speed_samples"].append(int(self.telemetry.get("speed", 0)))
+        # Recording: append a telemetry frame with the elapsed offset. Cap the
+        # track length so a very long turn can't grow it unbounded (at 1 frame/s
+        # this is ~2h of capture; older frames are dropped).
+        if self._rec_start is not None:
+            self._rec_track.append({
+                "t": round(time.monotonic() - self._rec_start, 1),
+                "speed": int(self.telemetry.get("speed", 0)),
+                "depth": int(self.telemetry.get("depth", 0)),
+                "stroke": int(self.telemetry.get("stroke", 0)),
+                "sensation": int(self.telemetry.get("sensation", 0)),
+                "pattern": int(self.telemetry.get("pattern", 0)),
+            })
+            if len(self._rec_track) > 7200:
+                self._rec_track = self._rec_track[-7200:]
 
     def _build_recap(self, cid: str) -> dict:
         stats = self.session_stats.get(cid) or {}
@@ -342,6 +368,70 @@ class Hub:
             "avg_speed_percent": int(sum(moving) / len(moving)) if moving else 0,
             "peak_speed_percent": max(samples) if samples else 0,
         }
+
+    async def _save_recording(self, cid: str, reason: str) -> None:
+        """Persist the turn's telemetry track to the `recordings` collection.
+        Best-effort: swallows DB errors and never blocks turn teardown. Skips
+        trivial tracks (a turn where nothing ever moved) so the list stays useful."""
+        track = self._rec_track
+        self._rec_track = []
+        self._rec_start = None
+        if not track:
+            return
+        # Skip a recording where the device never actually moved.
+        if not any(f.get("speed", 0) > 0 for f in track):
+            return
+        client = self.clients.get(cid) or {}
+        label = client.get("label") or "Guest"
+        code = client.get("code") or ""
+        try:
+            await db.recordings.insert_one({
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "label": label,
+                "code": code,
+                "reason": reason,
+                "duration_seconds": int(track[-1]["t"]) if track else 0,
+                "frame_count": len(track),
+                "track": track,
+            })
+        except Exception as e:
+            logger.warning("failed to save recording: %s", e)
+
+    async def replay_recording(self, track: List[dict], speed_mult: float = 1.0) -> None:
+        """Play a saved telemetry track back to the device, reproducing the
+        original timing (optionally sped up/slowed by speed_mult). Refuses to
+        run while a live turn is active or another replay is in flight, so a
+        replay can never fight a guest for the device. Always stops the device
+        when done or interrupted."""
+        if self.active_id is not None or self._replaying:
+            return
+        if not track:
+            return
+        self._replaying = True
+        try:
+            await self.send_to_host({"type": "command", "cmd": "go:strokeEngine"})
+            prev_t = 0.0
+            mult = speed_mult if speed_mult and speed_mult > 0 else 1.0
+            for frame in track:
+                if not self._replaying:  # stopped externally
+                    break
+                gap = max(0.0, (frame.get("t", 0.0) - prev_t)) / mult
+                prev_t = frame.get("t", 0.0)
+                if gap:
+                    await asyncio.sleep(min(gap, 30))  # cap any single gap
+                # Push the frame's control values through the host.
+                for key in ("depth", "stroke", "sensation", "pattern", "speed"):
+                    val = int(frame.get(key, 0))
+                    await self.send_to_host({"type": "command", "cmd": f"set:{key}:{val}"})
+        finally:
+            self._replaying = False
+            # Safety: always stop the device after a replay.
+            await self.send_to_host({"type": "command", "cmd": "set:speed:0"})
+            await self.send_to_host({"type": "command", "cmd": "go:menu"})
+
+    def stop_replay(self) -> None:
+        """Signal an in-flight replay to stop at its next frame."""
+        self._replaying = False
 
     async def _emit_recap(self, cid: str, reason: str) -> None:
         client = self.clients.get(cid)
@@ -586,6 +676,8 @@ class Hub:
         self.active_paused_at = None
         # Drop the recap accumulator for this turn now that we've emitted it.
         self.session_stats.pop(cid, None)
+        # Persist the recording track (best-effort; never blocks turn teardown).
+        await self._save_recording(cid, reason)
         self.reset_telemetry()
         await self.push_telemetry()
 
@@ -867,7 +959,6 @@ class Hub:
         # they're muted so their message doesn't just vanish silently.
         code = client.get("code", "").upper()
         if code in self.muted_codes:
-            logger.info("chat from muted code %s dropped; sending mute notice", code)
             await self._send(client["ws"], {"type": "chat_muted_notice"})
             return
         author = self._safe_label(client)

@@ -12,6 +12,7 @@ import { LiveQueue } from "@/components/LiveQueue";
 import { TwoFactorPanel } from "@/components/TwoFactorPanel";
 import { RecentActivity } from "@/components/RecentActivity";
 import { SystemHealth } from "@/components/SystemHealth";
+import { SessionRecordings } from "@/components/SessionRecordings";
 import { HeartRateSync } from "@/components/HeartRateSync";
 import { ToysPanel } from "@/components/ToysPanel";
 import { ObsStream } from "@/components/ObsStream";
@@ -86,6 +87,7 @@ const PANEL_DEFS = {
   "live-session": { label: "Live Session" },
   "recent-activity": { label: "Recent Activity" },
   "system-health": { label: "System Health" },
+  "session-recordings": { label: "Session Recordings" },
   "theme-picker": { label: "Theme Picker" },
   "owner-name": { label: "Chat Name" },
   "live-overlay": { label: "Live Overlay" },
@@ -780,6 +782,7 @@ export default function AdminDashboard() {
     ),
     "recent-activity": <RecentActivity key="recent-activity-panel" />,
     "system-health": <SystemHealth key="system-health-panel" />,
+    "session-recordings": <SessionRecordings key="session-recordings-panel" />,
     "theme-picker": <ThemePicker key="theme-picker-panel" />,
     "owner-name": <OwnerNameCard key="owner-name-panel" onChanged={setOwnerName} />,
     "live-overlay": (() => {
