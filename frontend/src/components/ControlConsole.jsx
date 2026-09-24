@@ -77,9 +77,9 @@ export function ControlConsole({ onCommand, disabled = false, autoStart = false,
   const [activeProgram, setActiveProgram] = useState(null);
   const [state, setState] = useState(() => ({
     speed: 0,
-    depth: Math.max(initialState?.depth ?? 60, minDepth),
-    stroke: initialState?.stroke ?? 60,
-    sensation: initialState?.sensation ?? 50,
+    depth: Math.max(initialState?.depth ?? 0, minDepth),
+    stroke: initialState?.stroke ?? 0,
+    sensation: initialState?.sensation ?? 0,
   }));
   const [pattern, setPattern] = useState(initialState?.pattern ?? 0);
   const [presets, setPresets] = useState(() => loadPresets());
@@ -223,7 +223,9 @@ export function ControlConsole({ onCommand, disabled = false, autoStart = false,
     onCommand(cmd.depth(startDepth));
     onCommand(cmd.stroke(startStroke));
     onCommand(cmd.sensation(state.sensation));
-    const startSpeed = clampSpeed(state.speed > 0 ? state.speed : 30);
+    // Engage the stroke engine but honour a 0 speed — the device stays still
+    // until the guest deliberately raises speed (rather than auto-jumping to 30).
+    const startSpeed = clampSpeed(state.speed);
     setState((s) => ({ ...s, depth: startDepth, stroke: startStroke, speed: startSpeed }));
     onCommand(cmd.speed(startSpeed));
     setRunning(true);

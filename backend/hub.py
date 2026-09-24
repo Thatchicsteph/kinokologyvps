@@ -955,6 +955,21 @@ class Hub:
             if not paused and self.active_id is not None and self.active_remaining() <= 0:
                 await self.end_active("time_up")
                 await self.promote()
+            # Sweep the queue for holders whose code has expired while waiting,
+            # so an expired code never sits in line blocking the people behind
+            # it. promote() already skips expired codes when reaching the front;
+            # this catches them earlier, anywhere in the queue.
+            if self.queue:
+                for cid in list(self.queue):
+                    client = self.clients.get(cid)
+                    if client is None:
+                        self.queue.remove(cid)
+                        continue
+                    if await self.code_remaining(client["code"]) <= 0:
+                        await self._send(client["ws"], {"type": "expired"})
+                        self.queue.remove(cid)
+                        self.clients.pop(cid, None)
+                        self.typing_at.pop(cid, None)
             # Persist the running clock so a restart doesn't hand the guest
             # back all their spent time.
             if not paused and self.active_id is not None and self.active_start is not None:
