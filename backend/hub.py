@@ -263,6 +263,8 @@ class Hub:
             self.muted_codes.discard(code)
         # Tell the host the current mute set so the admin UI can reflect it.
         await self.send_to_host({"type": "chat_muted", "codes": sorted(self.muted_codes)})
+        # Re-broadcast state so the active guest's muted flag refreshes in the UI.
+        await self.broadcast()
 
     @staticmethod
     def _clean_label(name: str) -> Optional[str]:
@@ -819,19 +821,30 @@ class Hub:
 
     def public_state(self, for_guests: bool = False) -> dict:
         active_label = None
+        active_code = None
         if self.active_id and self.active_id in self.clients:
             active_client = self.clients[self.active_id]
             active_label = self._safe_label(active_client) if for_guests else active_client["label"]
+            # Host-only: expose the active guest's access code so the owner UI
+            # can offer a per-guest mute. Never sent to guests.
+            if not for_guests:
+                active_code = active_client.get("code")
         queue_view = []
         for i, cid in enumerate(self.queue):
             c = self.clients.get(cid)
             if c:
                 label = self._safe_label(c) if for_guests else c["label"]
                 queue_view.append({"label": label, "position": i + 1})
+        active_block = None
+        if self.active_id:
+            active_block = {"label": active_label, "remaining_seconds": self.active_remaining()}
+            if not for_guests:
+                active_block["code"] = active_code
+                active_block["muted"] = (active_code or "").upper() in self.muted_codes
         return {
             "host_connected": self.host_ws is not None,
             "device_state": self.device_state,
-            "active": {"label": active_label, "remaining_seconds": self.active_remaining()} if self.active_id else None,
+            "active": active_block,
             "queue": queue_view,
             "queue_length": len(self.queue),
             "limits": self.limits,
