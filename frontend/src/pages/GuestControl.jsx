@@ -136,6 +136,13 @@ export default function GuestControl() {
         return;
       }
       if (msg.type === "ping") return; // server liveness probe — no action needed
+      if (msg.type === "revoked") {
+        // Owner revoked or deleted this access code — remove the guest entirely.
+        toast.error("Your access code was revoked by the owner.");
+        setPhase("ended");
+        try { wsRef.current && wsRef.current.close(); } catch (_) {}
+        return;
+      }
       if (msg.type === "turn_ended" || msg.type === "expired") {
         // Time's up (or manual boot) — check whether the server is keeping
         // the socket open so we downgrade to spectator instead of showing

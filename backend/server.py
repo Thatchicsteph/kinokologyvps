@@ -595,6 +595,10 @@ async def revoke_code(code_id: str, user: dict = Depends(get_current_user)):
         {"_id": parse_object_id(code_id)}, {"$set": {"revoked": True}})
     if doc:
         await log_event("security", "code_revoked", actor=user["email"], target=doc.get("code"))
+        # Kick the holder out of the session so a revoked code can't keep the
+        # active slot or a queue position.
+        async with hub.lock:
+            await hub.evict_code(doc.get("code", ""))
     return {"ok": True}
 
 @api_router.post("/codes/{code_id}/add-minutes")
@@ -616,6 +620,10 @@ async def delete_code(code_id: str, user: dict = Depends(get_current_user)):
     await db.access_codes.delete_one({"_id": oid})
     if doc:
         await log_event("security", "code_deleted", actor=user["email"], target=doc.get("code"))
+        # Kick the holder out of the session so a deleted code can't keep the
+        # active slot or a queue position.
+        async with hub.lock:
+            await hub.evict_code(doc.get("code", ""))
     return {"ok": True}
 
 # ------------------------------------------------------------------

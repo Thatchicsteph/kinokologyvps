@@ -698,6 +698,51 @@ class Hub:
         self.typing_at.pop(cid, None)
         await self.broadcast_presence()
 
+    async def evict_code(self, code: str) -> bool:
+        """Owner revoked or deleted an access code: forcibly remove its holder
+        from the session so a stale code can't hold the active slot or a queue
+        position. Handles the active guest (ends the turn + promotes the next
+        in line), any queued holders, and a pending reconnect-grace timer.
+        Returns True if anything was evicted. Caller must hold self.lock."""
+        code = (code or "").strip().upper()
+        if not code:
+            return False
+        evicted = False
+
+        # 1) Cancel a reconnect-grace timer for this code (guest was mid-refresh).
+        grace_task = self.disconnect_grace.pop(code, None)
+        if grace_task is not None:
+            grace_task.cancel()
+            evicted = True
+
+        # 2) Active holder → notify, end the turn, promote the next guest.
+        if self.active_id is not None:
+            active_client = self.clients.get(self.active_id)
+            if active_client and active_client.get("code", "").upper() == code:
+                await self._send(active_client["ws"], {"type": "revoked"})
+                await self.send_to_host({"type": "command", "cmd": "set:speed:0"})
+                await self.send_to_host({"type": "command", "cmd": "go:menu"})
+                self.clients.pop(self.active_id, None)
+                self.typing_at.pop(self.active_id, None)
+                await self.end_active("revoked")
+                evicted = True
+
+        # 3) Any queued holders with this code → notify + drop.
+        for cid in list(self.queue):
+            client = self.clients.get(cid)
+            if client and client.get("code", "").upper() == code:
+                await self._send(client["ws"], {"type": "revoked"})
+                self.queue.remove(cid)
+                self.clients.pop(cid, None)
+                self.typing_at.pop(cid, None)
+                self.muted_codes.discard(code)
+                evicted = True
+
+        if evicted:
+            await self.promote()
+            await self.broadcast()
+        return evicted
+
     async def handle_command(self, cid: str, cmd: str):
         if cid != self.active_id:
             return
