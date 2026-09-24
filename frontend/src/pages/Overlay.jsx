@@ -36,7 +36,7 @@ export default function Overlay() {
 
   const [frame, setFrame] = useState({
     speed: 0, depth: 0, stroke: 0, sensation: 0, pattern: 0, active_program: null,
-    run_seconds: 0, session_seconds: 0, running: false,
+    run_seconds: 0, session_seconds: 0, running: false, replaying: false,
     controller: null, host_connected: false,
     hr_bpm: 0, hr_connected: false, hr_cutoff: 0, hr_over: false,
     hr_target: 0, hr_sync_enabled: false,
@@ -140,6 +140,15 @@ export default function Overlay() {
             <span className="font-display font-black tracking-[0.25em] text-lg">KINKOLOGY LIVE</span>
           </div>
           <div className="flex items-center gap-5">
+            {frame.replaying && (
+              <span
+                className="flex items-center gap-2 font-mono-data text-xs uppercase tracking-wide text-[var(--kink-purple)]"
+                data-testid="overlay-replaying"
+              >
+                <span className="h-2.5 w-2.5 rounded-full bg-[var(--kink-purple)] pulse-dot" />
+                Replaying
+              </span>
+            )}
             {frame.controller && (
               <span className="font-mono-data text-sm text-[var(--kink-text-2)]" data-testid="overlay-controller">
                 CTRL: <span className="text-white">{frame.controller}</span>

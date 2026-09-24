@@ -410,6 +410,7 @@ class Hub:
         self._replaying = True
         try:
             await self.send_to_host({"type": "command", "cmd": "go:strokeEngine"})
+            await self.push_telemetry()  # flip the overlay into replaying state
             prev_t = 0.0
             mult = speed_mult if speed_mult and speed_mult > 0 else 1.0
             for frame in track:
@@ -423,11 +424,16 @@ class Hub:
                 for key in ("depth", "stroke", "sensation", "pattern", "speed"):
                     val = int(frame.get(key, 0))
                     await self.send_to_host({"type": "command", "cmd": f"set:{key}:{val}"})
+                    # Mirror into live telemetry so the overlay animates during replay.
+                    self.telemetry[key] = val
+                await self.push_telemetry()
         finally:
             self._replaying = False
             # Safety: always stop the device after a replay.
             await self.send_to_host({"type": "command", "cmd": "set:speed:0"})
             await self.send_to_host({"type": "command", "cmd": "go:menu"})
+            self.telemetry["speed"] = 0
+            await self.push_telemetry()  # clear the replaying indicator
 
     def stop_replay(self) -> None:
         """Signal an in-flight replay to stop at its next frame."""
@@ -483,6 +489,7 @@ class Hub:
             "hr_target": int(self.hr_target),
             "hr_sync_enabled": bool(self.hr_sync_enabled),
             "active_program": self.active_program,
+            "replaying": self._replaying,
             **self.telemetry,
         }
 
