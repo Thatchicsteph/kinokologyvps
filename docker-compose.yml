@@ -10,6 +10,14 @@ services:
       - mongo_data:/data/db
     networks:
       - kinkology
+    # Restart Mongo if it stops answering pings (e.g. wedged under memory
+    # pressure). mongosh ships in the mongo:7.0 image.
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
     deploy:
       resources:
         limits:
@@ -60,6 +68,16 @@ services:
       - mongo
     networks:
       - kinkology
+    # Health probe: if the API stops answering (hung, deadlocked, or wedged by
+    # memory pressure) Docker marks the container unhealthy and — combined with
+    # restart: unless-stopped — restarts it. Uses python since the slim image
+    # has no curl. start_period gives uvicorn+Mongo time to come up on boot.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8001/api/session/state', timeout=5).status==200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
     # aiortc relay: CPU cost scales with viewer count (SRTP encryption per
     # stream), not resolution. 1 CPU / 512M suits 1 publisher + ~10 viewers
     # on a small VPS; raise cpus for more concurrent viewers.
