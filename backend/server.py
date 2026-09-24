@@ -1,4 +1,5 @@
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -2002,6 +2003,19 @@ async def get_ice_servers():
     s = await load_settings()
     return {"iceServers": servers, "whepUrl": s.get("whep_external_url", "")}
 
+
+@api_router.get("/health")
+async def health():
+    """Lightweight, unauthenticated liveness/readiness probe for the Docker
+    healthcheck and external monitors. Returns 200 with {"status":"ok"} when
+    the API is up and Mongo answers a ping; 503 if the database is unreachable.
+    Does no auth and touches no session state, so it is cheap to poll."""
+    try:
+        await db.command("ping")
+        return {"status": "ok", "db": "ok"}
+    except Exception as e:
+        logger.warning("health check: mongo ping failed: %s", e)
+        return JSONResponse(status_code=503, content={"status": "degraded", "db": "down"})
 
 app.include_router(api_router)
 
