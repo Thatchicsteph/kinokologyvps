@@ -126,6 +126,10 @@ class Hub:
         self._rec_start: Optional[float] = None
         # Guard so a replay can't be started twice concurrently.
         self._replaying: bool = False
+        # A recording the owner has marked "featured" for guests to watch when
+        # replayed. Lightweight metadata only ({id, label, duration_seconds});
+        # None when nothing is featured. Set via the /recordings feature route.
+        self.featured_recording: Optional[dict] = None
         self.lock = asyncio.Lock()
 
     TYPING_TTL_S = 4.0
@@ -411,6 +415,7 @@ class Hub:
         try:
             await self.send_to_host({"type": "command", "cmd": "go:strokeEngine"})
             await self.push_telemetry()  # flip the overlay into replaying state
+            await self.broadcast()       # flip guests' featured "now playing" on
             prev_t = 0.0
             mult = speed_mult if speed_mult and speed_mult > 0 else 1.0
             for frame in track:
@@ -434,6 +439,7 @@ class Hub:
             await self.send_to_host({"type": "command", "cmd": "go:menu"})
             self.telemetry["speed"] = 0
             await self.push_telemetry()  # clear the replaying indicator
+            await self.broadcast()       # clear guests' featured "now playing"
 
     def stop_replay(self) -> None:
         """Signal an in-flight replay to stop at its next frame."""
@@ -1023,6 +1029,10 @@ class Hub:
             "device_state": self.device_state,
             "active": active_block,
             "queue": queue_view,
+            # Featured session: shown to guests so they can watch it when the
+            # owner replays it. `replaying` lets the guest UI show "now playing".
+            "featured": self.featured_recording,
+            "replaying": self._replaying,
             "queue_length": len(self.queue),
             "limits": self.limits,
             "toys": {"available": self.toys_available, "pattern": self.toys_pattern, "locked": self.toys_locked},

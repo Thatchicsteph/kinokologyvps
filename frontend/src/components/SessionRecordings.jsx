@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from "react";
-import { Play, Square, Trash2, RefreshCw } from "lucide-react";
+import { Play, Square, Trash2, RefreshCw, Star } from "lucide-react";
 import { api, fmtTime } from "@/lib/api";
 import { toast } from "sonner";
 
@@ -19,7 +19,7 @@ function fmtWhen(iso) {
   }
 }
 
-export function SessionRecordings() {
+export function SessionRecordings({ featuredId = null }) {
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -66,6 +66,21 @@ export function SessionRecordings() {
       setItems((prev) => prev.filter((r) => r.id !== id));
     } catch (_) {
       toast.error("Could not delete recording.");
+    }
+  };
+
+  const feature = async (id) => {
+    const isFeatured = featuredId === id;
+    try {
+      if (isFeatured) {
+        await api.post(`/recordings/none/feature`, { featured: false });
+        toast.info("Cleared featured session.");
+      } else {
+        await api.post(`/recordings/${id}/feature`, { featured: true });
+        toast.success("Set as featured session — guests can see it.");
+      }
+    } catch (_) {
+      toast.error("Could not update featured session.");
     }
   };
 
@@ -116,6 +131,18 @@ export function SessionRecordings() {
                 </span>
               </div>
               <div className="flex items-center gap-1 shrink-0">
+                <button
+                  onClick={() => feature(r.id)}
+                  data-testid={`recording-feature-${r.id}`}
+                  title={featuredId === r.id ? "Featured — click to unfeature" : "Feature this session for guests"}
+                  className={`p-1.5 transition-colors ${
+                    featuredId === r.id
+                      ? "text-[var(--kink-purple)]"
+                      : "text-[var(--kink-muted)] hover:text-[var(--kink-purple)] opacity-0 group-hover:opacity-100"
+                  }`}
+                >
+                  <Star size={14} fill={featuredId === r.id ? "currentColor" : "none"} />
+                </button>
                 <button
                   onClick={() => replay(r.id)}
                   disabled={busy}

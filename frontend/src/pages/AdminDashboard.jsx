@@ -782,7 +782,7 @@ export default function AdminDashboard() {
     ),
     "recent-activity": <RecentActivity key="recent-activity-panel" />,
     "system-health": <SystemHealth key="system-health-panel" />,
-    "session-recordings": <SessionRecordings key="session-recordings-panel" />,
+    "session-recordings": <SessionRecordings key="session-recordings-panel" featuredId={state.featured?.id || null} />,
     "theme-picker": <ThemePicker key="theme-picker-panel" />,
     "owner-name": <OwnerNameCard key="owner-name-panel" onChanged={setOwnerName} />,
     "live-overlay": (() => {

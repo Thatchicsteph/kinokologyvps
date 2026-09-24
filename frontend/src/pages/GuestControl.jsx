@@ -332,6 +332,22 @@ export default function GuestControl() {
                 <p className="font-mono-data text-xs text-[var(--kink-danger)] mt-4">⚠ Device host offline</p>
               )}
             </div>
+            {snap.featured && (
+              <div className="hud-panel p-5 sm:p-6" data-testid="featured-session">
+                <div className="flex items-center justify-between">
+                  <span className="font-display text-xs tracking-[0.15em] text-[var(--kink-text-2)]">★ FEATURED SESSION</span>
+                  {snap.replaying && (
+                    <span className="flex items-center gap-1.5 font-mono-data text-[10px] uppercase tracking-wide text-[var(--kink-purple)]">
+                      <span className="h-2 w-2 rounded-full bg-[var(--kink-purple)] pulse-dot" /> Now playing
+                    </span>
+                  )}
+                </div>
+                <p className="text-white text-sm mt-2">{snap.featured.label}</p>
+                <p className="font-mono-data text-[11px] text-[var(--kink-muted)] mt-1">
+                  {fmtTime(snap.featured.duration_seconds)} · {snap.replaying ? "playing on the device now — watch the stream" : "the host can replay this live"}
+                </p>
+              </div>
+            )}
             <div className="hud-panel p-5 sm:p-6">
               <ChatPanel
                 messages={chatMsgs}

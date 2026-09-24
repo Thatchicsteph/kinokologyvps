@@ -817,6 +817,26 @@ async def list_recordings(user: dict = Depends(get_current_user)):
     docs = await db.recordings.find({}, {"track": 0}).sort("created_at", -1).to_list(length=200)
     return [_recording_summary(d) for d in docs]
 
+@api_router.post("/recordings/{rec_id}/feature")
+async def feature_recording(rec_id: str, body: dict = None, user: dict = Depends(get_current_user)):
+    """Mark a recording as the featured session guests can watch (or clear it
+    when body.featured is false / rec_id is 'none')."""
+    clear = (rec_id == "none") or (isinstance(body, dict) and body.get("featured") is False)
+    async with hub.lock:
+        if clear:
+            hub.featured_recording = None
+        else:
+            doc = await db.recordings.find_one({"_id": parse_object_id(rec_id)})
+            if not doc:
+                raise HTTPException(status_code=404, detail="Recording not found.")
+            hub.featured_recording = {
+                "id": str(doc["_id"]),
+                "label": doc.get("label", "Guest"),
+                "duration_seconds": doc.get("duration_seconds", 0),
+            }
+        await hub.broadcast()
+    return {"ok": True, "featured": hub.featured_recording}
+
 @api_router.post("/recordings/{rec_id}/replay")
 async def replay_recording(rec_id: str, body: dict = None, user: dict = Depends(get_current_user)):
     doc = await db.recordings.find_one({"_id": parse_object_id(rec_id)})
@@ -844,6 +864,11 @@ async def stop_replay(user: dict = Depends(get_current_user)):
 @api_router.delete("/recordings/{rec_id}")
 async def delete_recording(rec_id: str, user: dict = Depends(get_current_user)):
     await db.recordings.delete_one({"_id": parse_object_id(rec_id)})
+    # If the deleted recording was featured, clear the feature.
+    if hub.featured_recording and hub.featured_recording.get("id") == rec_id:
+        async with hub.lock:
+            hub.featured_recording = None
+            await hub.broadcast()
     await log_event("session", "recording_deleted", actor=user["email"], target=rec_id)
     return {"ok": True}
 
