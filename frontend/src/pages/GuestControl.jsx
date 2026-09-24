@@ -162,6 +162,7 @@ export default function GuestControl() {
         setChatMsgs((prev) => prev.map((m) => (m.id === msg.msg_id ? { ...m, reactions: msg.reactions } : m)));
       }
       if (msg.type === "chat_cleared") setChatMsgs([]);
+      if (msg.type === "chat_delete") setChatMsgs((prev) => prev.filter((m) => m.id !== msg.msg_id));
       if (msg.type === "presence") setPresence(msg);
       if (msg.type === "reaction") setReactions((prev) => [...prev.slice(-24), msg]);
       if (msg.type === "theme") applyTheme(msg.theme);

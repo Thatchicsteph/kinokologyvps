@@ -857,6 +857,12 @@ async def ws_host(ws: WebSocket):
                 await hub.toggle_chat_reaction(str(data.get("msg_id", "")),
                                                str(data.get("emoji", "")),
                                                hub.owner_name)
+            elif t == "chat_delete":
+                # Owner moderation: delete a chat message for everyone.
+                await hub.delete_chat_message(str(data.get("msg_id", "")))
+            elif t == "chat_mute":
+                # Owner moderation: mute/unmute an access code in chat.
+                await hub.set_muted(str(data.get("code", "")), bool(data.get("muted", True)))
     except WebSocketDisconnect:
         pass
     except Exception:

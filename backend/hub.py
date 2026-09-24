@@ -97,6 +97,10 @@ class Hub:
         self.chat_msgs: List[dict] = []
         # Per-sender rate limit: 1 message / 1s minimum gap.
         self.chat_last_sent: Dict[str, float] = {}
+        # Moderation: access codes the owner has muted in chat. A muted guest's
+        # chat messages are silently dropped (they can still control/watch).
+        # Keyed by access code so a mute survives a reconnect within the turn.
+        self.muted_codes: set = set()
         # Presence: last-typing-at monotonic timestamps. Owner uses key "owner";
         # guests use their client id. A guest is "typing" if last-typing-at is
         # within TYPING_TTL_S seconds. Presence changes are broadcast to all.
@@ -231,6 +235,34 @@ class Hub:
         for c in list(self.clients.values()):
             await self._send(c["ws"], payload)
         await self.push_chat_overlay(payload)
+
+    async def delete_chat_message(self, msg_id: str) -> None:
+        """Owner moderation: remove a chat message for everyone. Broadcasts a
+        chat_delete event so all clients (and the chat overlay) drop it."""
+        if not msg_id:
+            return
+        before = len(self.chat_msgs)
+        self.chat_msgs = [m for m in self.chat_msgs if m.get("id") != msg_id]
+        if len(self.chat_msgs) == before:
+            return  # nothing removed
+        payload = {"type": "chat_delete", "msg_id": msg_id}
+        await self.send_to_host(payload)
+        for c in list(self.clients.values()):
+            await self._send(c["ws"], payload)
+        await self.push_chat_overlay(payload)
+
+    async def set_muted(self, code: str, muted: bool) -> None:
+        """Owner moderation: mute/unmute an access code in chat. A muted guest
+        keeps control/viewing but their chat messages are dropped."""
+        code = (code or "").strip().upper()
+        if not code:
+            return
+        if muted:
+            self.muted_codes.add(code)
+        else:
+            self.muted_codes.discard(code)
+        # Tell the host the current mute set so the admin UI can reflect it.
+        await self.send_to_host({"type": "chat_muted", "codes": sorted(self.muted_codes)})
 
     @staticmethod
     def _clean_label(name: str) -> Optional[str]:
@@ -757,6 +789,9 @@ class Hub:
     async def handle_guest_chat(self, cid: str, text: str):
         client = self.clients.get(cid)
         if not client:
+            return
+        # Moderation: silently drop chat from a muted access code.
+        if client.get("code", "").upper() in self.muted_codes:
             return
         author = self._safe_label(client)
         await self._append_chat(author=author, role="guest", text=text, sender_id=f"g:{cid}")

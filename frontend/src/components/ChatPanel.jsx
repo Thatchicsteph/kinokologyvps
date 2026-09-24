@@ -35,6 +35,7 @@ export function ChatPanel({
   presence = null,
   onTyping,
   onReact,
+  onDelete,
   readOnly = false,
 }) {
   const [text, setText] = useState("");
@@ -152,6 +153,18 @@ export function ChatPanel({
                     className="ml-1.5 inline-flex align-middle opacity-0 group-hover:opacity-100 focus:opacity-100 text-[var(--kink-muted)] hover:text-[var(--kink-purple)] transition-opacity"
                   >
                     <SmilePlus size={12} />
+                  </button>
+                )}
+                {onDelete && !readOnly && (
+                  <button
+                    type="button"
+                    onClick={() => onDelete(m.id)}
+                    data-testid={`chat-delete-${m.id}`}
+                    aria-label="Delete message"
+                    title="Delete this message for everyone"
+                    className="ml-1 inline-flex align-middle opacity-0 group-hover:opacity-100 focus:opacity-100 text-[var(--kink-muted)] hover:text-[var(--kink-red,#ff5c73)] transition-opacity"
+                  >
+                    <Trash2 size={12} />
                   </button>
                 )}
                 {(entries.length > 0 || showPicker) && (

@@ -3,7 +3,7 @@ import { WS_BASE, API } from "@/lib/api";
 import { OSSM } from "@/lib/ossm";
 import { toast } from "sonner";
 
-export function useBleHost({ onCommand, onToyCommand, onToysLock, onChatMsg, onChatHistory, onChatCleared, onPresence, onReaction, onChatReact, onTheme } = {}) {
+export function useBleHost({ onCommand, onToyCommand, onToysLock, onChatMsg, onChatHistory, onChatCleared, onPresence, onReaction, onChatReact, onChatDelete, onChatMuted, onTheme } = {}) {
   const [connected, setConnected] = useState(false);
   const [deviceName, setDeviceName] = useState("");
   const [wsConnected, setWsConnected] = useState(false);
@@ -67,12 +67,16 @@ export function useBleHost({ onCommand, onToyCommand, onToysLock, onChatMsg, onC
           try { onReaction(msg); } catch (e) {}
         } else if (msg.type === "chat_react" && onChatReact) {
           try { onChatReact(msg); } catch (e) {}
+        } else if (msg.type === "chat_delete" && onChatDelete) {
+          try { onChatDelete(msg.msg_id); } catch (e) {}
+        } else if (msg.type === "chat_muted" && onChatMuted) {
+          try { onChatMuted(msg.codes || []); } catch (e) {}
         } else if (msg.type === "theme" && onTheme) {
           try { onTheme(msg.theme); } catch (e) {}
         }
       } catch (e) {}
     };
-  }, [writeCommand, onToyCommand, onToysLock, onChatMsg, onChatHistory, onChatCleared, onPresence, onReaction, onChatReact, onTheme]);
+  }, [writeCommand, onToyCommand, onToysLock, onChatMsg, onChatHistory, onChatCleared, onPresence, onReaction, onChatReact, onChatDelete, onChatMuted, onTheme]);
 
   const closeHostWs = useCallback(() => {
     if (wsRef.current) {

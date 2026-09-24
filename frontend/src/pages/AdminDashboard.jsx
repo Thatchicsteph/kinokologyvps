@@ -465,6 +465,7 @@ export default function AdminDashboard() {
     onPresence: (p) => setPresence(p),
     onReaction: (r) => setReactions((prev) => [...prev.slice(-24), r]),
     onChatReact: (msg) => setChatMsgs((prev) => prev.map((m) => (m.id === msg.msg_id ? { ...m, reactions: msg.reactions } : m))),
+    onChatDelete: (msgId) => setChatMsgs((prev) => prev.filter((m) => m.id !== msgId)),
     onTheme: (t) => applyTheme(t),
   });
   bleRef.current = ble;
@@ -611,6 +612,7 @@ export default function AdminDashboard() {
   const sendChat = (text) => ble.sendHostMessage({ type: "chat", text });
   const sendReaction = (emoji) => ble.sendHostMessage({ type: "reaction", emoji });
   const sendChatReact = (msgId, emoji) => ble.sendHostMessage({ type: "chat_react", msg_id: msgId, emoji });
+  const sendChatDelete = (msgId) => ble.sendHostMessage({ type: "chat_delete", msg_id: msgId });
   const clearChat = async () => {
     try { await api.delete("/session/chat"); toast("Chat cleared"); }
     catch (e) { toast.error("Could not clear chat"); }
@@ -768,6 +770,7 @@ export default function AdminDashboard() {
             presence={presence}
             onTyping={() => ble.sendHostMessage({ type: "typing" })}
             onReact={sendChatReact}
+            onDelete={sendChatDelete}
           />
         </div>
       </div>
