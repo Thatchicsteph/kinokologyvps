@@ -39,6 +39,9 @@ load_dotenv(ROOT_DIR / '.env')
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("ossm-bridge")
 
+# Wall-clock when this process booted — used by the /api/metrics uptime field.
+_PROCESS_START = time.time()
+
 from stream import router as stream_router, shutdown as stream_shutdown, set_publish_token_provider, _log_ice_config
 import stream_patch
 
@@ -2063,6 +2066,51 @@ async def health():
     except Exception as e:
         logger.warning("health check: mongo ping failed: %s", e)
         return JSONResponse(status_code=503, content={"status": "degraded", "db": "down"})
+
+
+@api_router.get("/metrics")
+async def metrics(user: dict = Depends(get_current_user)):
+    """Admin-only operational snapshot for the health panel: process uptime,
+    DB status, live session/queue counts, and host memory if psutil is present.
+    Auth-gated (unlike /api/health) since it exposes internal state."""
+    now = time.time()
+    # DB status + a cheap document count as a liveness signal.
+    db_ok = True
+    users_count = None
+    try:
+        await db.command("ping")
+        users_count = await db.users.count_documents({})
+    except Exception as e:
+        db_ok = False
+        logger.warning("metrics: mongo access failed: %s", e)
+
+    # Host memory (optional — psutil may not be installed; degrade gracefully).
+    mem = None
+    try:
+        import psutil  # noqa: PLC0415
+        vm = psutil.virtual_memory()
+        mem = {
+            "total_mb": round(vm.total / 1048576),
+            "available_mb": round(vm.available / 1048576),
+            "percent_used": vm.percent,
+        }
+    except Exception:
+        mem = None  # psutil not installed — omit rather than fail
+
+    state = hub.public_state(for_guests=False)
+    return {
+        "status": "ok" if db_ok else "degraded",
+        "uptime_seconds": round(now - _PROCESS_START),
+        "db": {"ok": db_ok, "users": users_count},
+        "session": {
+            "host_connected": state.get("host_connected", False),
+            "active": state.get("active"),
+            "queue_length": state.get("queue_length", 0),
+            "connected_clients": len(hub.clients),
+        },
+        "memory": mem,
+        "server_time": datetime.now(timezone.utc).isoformat(),
+    }
 
 app.include_router(api_router)
 

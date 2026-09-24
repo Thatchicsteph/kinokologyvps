@@ -15,6 +15,7 @@ passlib>=1.7.4
 tzdata>=2024.2
 motor==3.3.1
 slowapi>=0.1.9
+psutil>=5.9.0
 pytest>=8.0.0
 pytest-xdist>=3.6.0
 black>=24.1.1
