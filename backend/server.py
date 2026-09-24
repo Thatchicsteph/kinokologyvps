@@ -611,6 +611,15 @@ async def add_minutes(code_id: str, body: CodeCreate, user: dict = Depends(get_c
     doc = await db.access_codes.find_one({"_id": oid})
     await log_event("security", "code_extended", actor=user["email"],
                     target=doc.get("code") if doc else None, detail={"minutes": body.minutes})
+    # If this code is the one currently active, extend the LIVE turn too — the
+    # running clock was snapshotted at promote time and won't otherwise pick up
+    # the new grant until the guest's next turn.
+    if doc:
+        code = (doc.get("code") or "").upper()
+        async with hub.lock:
+            active = hub.clients.get(hub.active_id) if hub.active_id else None
+            if active and (active.get("code") or "").upper() == code:
+                await hub.extend_active(int(body.minutes) * 60)
     return code_public(doc)
 
 @api_router.delete("/codes/{code_id}")
@@ -871,6 +880,14 @@ async def ws_host(ws: WebSocket):
             elif t == "chat_mute":
                 # Owner moderation: mute/unmute an access code in chat.
                 await hub.set_muted(str(data.get("code", "")), bool(data.get("muted", True)))
+            elif t == "queue_move":
+                # Owner reorders the waiting queue (direction: -1 up, +1 down).
+                async with hub.lock:
+                    await hub.move_in_queue(str(data.get("cid", "")), int(data.get("direction", 0)))
+            elif t == "extend_active":
+                # Owner adds time to the CURRENT turn, live.
+                async with hub.lock:
+                    await hub.extend_active(int(data.get("seconds", 0)))
     except WebSocketDisconnect:
         pass
     except Exception:

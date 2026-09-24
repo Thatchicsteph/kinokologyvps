@@ -614,6 +614,8 @@ export default function AdminDashboard() {
   const sendChatReact = (msgId, emoji) => ble.sendHostMessage({ type: "chat_react", msg_id: msgId, emoji });
   const sendChatDelete = (msgId) => ble.sendHostMessage({ type: "chat_delete", msg_id: msgId });
   const sendChatMute = (code, muted) => ble.sendHostMessage({ type: "chat_mute", code, muted });
+  const sendQueueMove = (cid, direction) => ble.sendHostMessage({ type: "queue_move", cid, direction });
+  const sendExtendActive = (minutes) => ble.sendHostMessage({ type: "extend_active", seconds: minutes * 60 });
   const clearChat = async () => {
     try { await api.delete("/session/chat"); toast("Chat cleared"); }
     catch (e) { toast.error("Could not clear chat"); }
@@ -758,7 +760,7 @@ export default function AdminDashboard() {
           </div>
         )}
 
-        <LiveQueue active={state.active} queue={state.queue} onMute={sendChatMute} />
+        <LiveQueue active={state.active} queue={state.queue} onMute={sendChatMute} onMove={sendQueueMove} onExtend={sendExtendActive} />
 
         <div className="mt-6 pt-6 border-t border-[var(--kink-overlay)]">
           <ChatPanel

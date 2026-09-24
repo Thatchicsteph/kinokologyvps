@@ -1,8 +1,8 @@
 import React from "react";
 import { fmtTime } from "@/lib/api";
-import { MicOff, Mic } from "lucide-react";
+import { MicOff, Mic, ChevronUp, ChevronDown, Plus } from "lucide-react";
 
-export function LiveQueue({ active, queue, you, onMute }) {
+export function LiveQueue({ active, queue, you, onMute, onMove, onExtend }) {
   const rows = [];
   if (active) {
     rows.push({
@@ -11,8 +11,12 @@ export function LiveQueue({ active, queue, you, onMute }) {
       code: active.code, muted: !!active.muted,
     });
   }
+  const qlen = (queue || []).length;
   (queue || []).forEach((q, i) =>
-    rows.push({ key: `q-${i}`, label: q.label || "Guest", isActive: false, sub: `#${q.position} in line` })
+    rows.push({
+      key: `q-${i}`, label: q.label || "Guest", isActive: false,
+      sub: `#${q.position} in line`, cid: q.cid, qIndex: i, qLen: qlen,
+    })
   );
 
   return (
@@ -45,7 +49,44 @@ export function LiveQueue({ active, queue, you, onMute }) {
               <span className="font-mono-data text-[10px] uppercase tracking-wide text-[var(--kink-red,#ff5c73)]">muted</span>
             )}
           </div>
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2">
+            {/* Queue reorder (waiting guests only) */}
+            {!r.isActive && onMove && r.cid && (
+              <div className="flex items-center">
+                <button
+                  type="button"
+                  onClick={() => onMove(r.cid, -1)}
+                  disabled={r.qIndex === 0}
+                  data-testid={`queue-up-${r.cid}`}
+                  title="Move up"
+                  className="p-1 text-[var(--kink-muted)] hover:text-[var(--kink-purple)] disabled:opacity-25 disabled:cursor-not-allowed transition-colors"
+                >
+                  <ChevronUp size={14} />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onMove(r.cid, 1)}
+                  disabled={r.qIndex === r.qLen - 1}
+                  data-testid={`queue-down-${r.cid}`}
+                  title="Move down"
+                  className="p-1 text-[var(--kink-muted)] hover:text-[var(--kink-purple)] disabled:opacity-25 disabled:cursor-not-allowed transition-colors"
+                >
+                  <ChevronDown size={14} />
+                </button>
+              </div>
+            )}
+            {/* Quick +time on the active turn */}
+            {r.isActive && onExtend && (
+              <button
+                type="button"
+                onClick={() => onExtend(5)}
+                data-testid="queue-extend-5"
+                title="Add 5 minutes to this turn"
+                className="flex items-center gap-0.5 px-1.5 py-1 text-[var(--kink-muted)] hover:text-[var(--kink-purple)] transition-colors"
+              >
+                <Plus size={12} /><span className="font-mono-data text-[11px]">5m</span>
+              </button>
+            )}
             {r.isActive && onMute && r.code && (
               <button
                 type="button"

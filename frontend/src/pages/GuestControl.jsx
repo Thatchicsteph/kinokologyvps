@@ -136,6 +136,10 @@ export default function GuestControl() {
         return;
       }
       if (msg.type === "ping") return; // server liveness probe — no action needed
+      if (msg.type === "chat_muted_notice") {
+        toast.warning("You've been muted by the owner — your messages won't be shown.");
+        return;
+      }
       if (msg.type === "revoked") {
         // Owner revoked or deleted this access code — remove the guest entirely.
         toast.error("Your access code was revoked by the owner.");

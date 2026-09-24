@@ -698,6 +698,32 @@ class Hub:
         self.typing_at.pop(cid, None)
         await self.broadcast_presence()
 
+    async def extend_active(self, seconds: int) -> bool:
+        """Add `seconds` to the CURRENTLY active turn's clock, live. add-minutes
+        on a code only bumps its stored grant, which a running turn (whose
+        remaining was snapshotted at promote time) wouldn't pick up until the
+        next turn — this applies the extension to the turn in progress. Returns
+        True if there was an active turn to extend. Caller holds self.lock."""
+        if self.active_id is None or seconds == 0:
+            return False
+        self.active_remaining_start = max(0, self.active_remaining_start + int(seconds))
+        await self.broadcast()
+        return True
+
+    async def move_in_queue(self, cid: str, direction: int) -> bool:
+        """Move a queued client up (direction<0) or down (direction>0) one slot.
+        No-op if the client isn't queued or is already at the edge. Returns True
+        if the order changed. Caller holds self.lock."""
+        if cid not in self.queue or direction == 0:
+            return False
+        i = self.queue.index(cid)
+        j = i - 1 if direction < 0 else i + 1
+        if j < 0 or j >= len(self.queue):
+            return False
+        self.queue[i], self.queue[j] = self.queue[j], self.queue[i]
+        await self.broadcast()
+        return True
+
     async def evict_code(self, code: str) -> bool:
         """Owner revoked or deleted an access code: forcibly remove its holder
         from the session so a stale code can't hold the active slot or a queue
@@ -837,8 +863,12 @@ class Hub:
         client = self.clients.get(cid)
         if not client:
             return
-        # Moderation: silently drop chat from a muted access code.
-        if client.get("code", "").upper() in self.muted_codes:
+        # Moderation: drop chat from a muted access code, but tell the sender
+        # they're muted so their message doesn't just vanish silently.
+        code = client.get("code", "").upper()
+        if code in self.muted_codes:
+            logger.info("chat from muted code %s dropped; sending mute notice", code)
+            await self._send(client["ws"], {"type": "chat_muted_notice"})
             return
         author = self._safe_label(client)
         await self._append_chat(author=author, role="guest", text=text, sender_id=f"g:{cid}")
@@ -879,7 +909,11 @@ class Hub:
             c = self.clients.get(cid)
             if c:
                 label = self._safe_label(c) if for_guests else c["label"]
-                queue_view.append({"label": label, "position": i + 1})
+                entry = {"label": label, "position": i + 1}
+                # Host-only: include the client id so the owner UI can reorder.
+                if not for_guests:
+                    entry["cid"] = cid
+                queue_view.append(entry)
         active_block = None
         if self.active_id:
             active_block = {"label": active_label, "remaining_seconds": self.active_remaining()}
