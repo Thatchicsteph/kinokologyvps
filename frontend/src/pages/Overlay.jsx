@@ -7,6 +7,34 @@ import kinkologyMark from "@/assets/kinkology-mark.png";
 import { PATTERNS } from "@/lib/ossm";
 import { PROGRAMS } from "@/components/ControlConsole";
 
+// Smoothly tween a displayed number toward its live target so the overlay
+// gauges glide instead of snapping when a new telemetry frame lands. Uses
+// requestAnimationFrame with an ease-out curve; snaps instantly for tiny
+// deltas so it always settles exactly on the target (no lingering fractions).
+function useEased(target, ms = 320) {
+  const [shown, setShown] = useState(target);
+  const ref = useRef({ from: target, to: target, start: 0, raf: 0 });
+  useEffect(() => {
+    const s = ref.current;
+    if (Math.abs(target - s.to) < 0.5) return; // already heading there
+    s.from = shown;
+    s.to = target;
+    s.start = performance.now();
+    const tick = (now) => {
+      const t = Math.min(1, (now - s.start) / ms);
+      const eased = 1 - Math.pow(1 - t, 3); // easeOutCubic
+      const v = s.from + (s.to - s.from) * eased;
+      setShown(Math.abs(s.to - v) < 0.5 ? s.to : v);
+      if (t < 1) s.raf = requestAnimationFrame(tick);
+    };
+    cancelAnimationFrame(s.raf);
+    s.raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(s.raf);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [target, ms]);
+  return Math.round(shown);
+}
+
 const METRICS = [
   { key: "speed",     label: "SPEED",     color: "#FF2A5F", icon: Gauge,   panelId: "speed"     },
   { key: "depth",     label: "DEPTH",     color: "#C7C9D1", icon: Move3d,  panelId: "depth"     },
@@ -17,6 +45,32 @@ const METRICS = [
 const CAP = 120;
 const HR_COLOR = "#FF4D6D";
 const HR_TARGET_COLOR = "#C7C9D1";
+
+// One metric gauge (speed/depth/stroke/sensation). The displayed % is eased
+// toward the live value so it glides on stream instead of snapping. The
+// sparkline is a history plot and is already smooth, so it uses the raw value.
+function MetricPanel({ metric, value, history, glassStyle }) {
+  const eased = useEased(value);
+  return (
+    <div
+      data-testid={`overlay-metric-${metric.key}`}
+      className="hud-panel p-5"
+      style={glassStyle}
+    >
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-2">
+          <metric.icon size={16} style={{ color: metric.color }} />
+          <span className="font-display text-xs tracking-[0.18em]" style={{ color: metric.color }}>{metric.label}</span>
+        </div>
+        <span className="font-mono-data font-extrabold text-3xl tabular-nums" style={{ color: metric.color }} data-testid={`overlay-value-${metric.key}`}>
+          {eased}
+          <span className="text-sm text-[var(--kink-muted)] ml-0.5">%</span>
+        </span>
+      </div>
+      <Sparkline data={history} color={metric.color} id={metric.key} height={72} />
+    </div>
+  );
+}
 
 // Default config — used until the fetch resolves.
 const DEFAULT_CONFIG = {
@@ -278,24 +332,13 @@ export default function Overlay() {
       {metricPanelsOrdered.length > 0 && (
         <div className={`grid gap-5 ${gridClass}`}>
           {metricPanelsOrdered.map((m) => (
-            <div
+            <MetricPanel
               key={m.key}
-              data-testid={`overlay-metric-${m.key}`}
-              className="hud-panel p-5"
-              style={glassStyle}
-            >
-              <div className="flex items-center justify-between mb-3">
-                <div className="flex items-center gap-2">
-                  <m.icon size={16} style={{ color: m.color }} />
-                  <span className="font-display text-xs tracking-[0.18em]" style={{ color: m.color }}>{m.label}</span>
-                </div>
-                <span className="font-mono-data font-extrabold text-3xl tabular-nums" style={{ color: m.color }} data-testid={`overlay-value-${m.key}`}>
-                  {frame[m.key]}
-                  <span className="text-sm text-[var(--kink-muted)] ml-0.5">%</span>
-                </span>
-              </div>
-              <Sparkline data={history[m.key]} color={m.color} id={m.key} height={72} />
-            </div>
+              metric={m}
+              value={frame[m.key]}
+              history={history[m.key]}
+              glassStyle={glassStyle}
+            />
           ))}
         </div>
       )}
