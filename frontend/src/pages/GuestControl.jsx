@@ -11,7 +11,7 @@ import { ReactionBar } from "@/components/ReactionBar";
 import { NicknamePrompt } from "@/components/NicknamePrompt";
 import { SessionRecap } from "@/components/SessionRecap";
 import { applyTheme } from "@/components/ThemeSync";
-import { Loader2, XCircle, Clock, Users, Settings2 } from "lucide-react";
+import { Loader2, XCircle, Clock, Users, Settings2, MicOff } from "lucide-react";
 import kinkologyMark from "@/assets/kinkology-mark.png";
 import { toast } from "sonner";
 import { createPanelLayout } from "@/lib/panelLayout";
@@ -63,6 +63,26 @@ const Shell = ({ code, wide = false, children }) => (
     {children}
   </div>
 );
+
+// Persistent banner shown while the owner has this guest muted in chat. Unlike
+// the one-time toast, this stays visible above the chat box the whole time
+// they're muted (and survives refresh/reconnect, since it's driven by the
+// server-side `you.muted` flag).
+const MuteBanner = ({ muted }) => {
+  if (!muted) return null;
+  return (
+    <div
+      data-testid="mute-banner"
+      role="status"
+      className="flex items-center gap-2 px-3 py-2 mb-3 border border-[var(--kink-red,#ff5c73)]/40 bg-[var(--kink-red,#ff5c73)]/[0.08] text-[var(--kink-red,#ff5c73)]"
+    >
+      <MicOff size={15} className="shrink-0" />
+      <span className="font-mono-data text-[11px] sm:text-xs leading-snug">
+        You've been muted by the owner — your messages won't be shown.
+      </span>
+    </div>
+  );
+};
 
 export default function GuestControl() {
   const { code } = useParams();
@@ -312,11 +332,11 @@ export default function GuestControl() {
             <ReactionBar onReact={sendReaction} />
           </div>
           <div className="space-y-4 lg:sticky lg:top-6">
-            <div className="hud-panel px-6 sm:px-10 py-10 sm:py-14 w-full text-center">
+            <div className="hud-panel px-6 sm:px-10 py-8 sm:py-14 w-full text-center">
               <Users className="text-[var(--kink-purple)] mx-auto" size={32} />
               <p className="font-display text-xs tracking-[0.2em] text-[var(--kink-text-2)] mt-4">YOU ARE IN THE QUEUE</p>
               <p
-                className="font-mono-data font-extrabold text-6xl sm:text-7xl lg:text-8xl text-[var(--kink-purple)] text-glow-purple mt-3"
+                className="font-mono-data font-extrabold text-5xl sm:text-7xl lg:text-8xl text-[var(--kink-purple)] text-glow-purple mt-3"
                 data-testid="queue-position"
               >
                 #{pos}
@@ -349,6 +369,7 @@ export default function GuestControl() {
               </div>
             )}
             <div className="hud-panel p-5 sm:p-6">
+              <MuteBanner muted={snap.you?.muted} />
               <ChatPanel
                 messages={chatMsgs}
                 onSend={sendChat}
@@ -399,6 +420,7 @@ export default function GuestControl() {
               </p>
             </div>
             <div className="hud-panel p-5 sm:p-6">
+              <MuteBanner muted={snap.you?.muted} />
               <ChatPanel
                 messages={chatMsgs}
                 onSend={sendChat}
@@ -457,6 +479,7 @@ export default function GuestControl() {
             ),
             "chat": (
               <div className="hud-panel p-5 sm:p-6" key="guest-chat-panel">
+                <MuteBanner muted={snap.you?.muted} />
                 <ChatPanel
                   messages={chatMsgs}
                   onSend={sendChat}
