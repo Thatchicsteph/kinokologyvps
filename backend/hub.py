@@ -982,16 +982,20 @@ class Hub:
 
     def client_status(self, cid: str) -> dict:
         client = self.clients.get(cid)
+        # Whether this client's access code is muted in chat by the owner —
+        # drives a persistent "you're muted" banner in the guest UI (not just
+        # a one-time toast), so it survives refresh/reconnect.
+        muted = bool(client and (client.get("code") or "").upper() in self.muted_codes)
         # View-only or time-expired clients are permanent spectators — they
         # never queue and never gain control, but stay connected to watch.
         if client and (client.get("view_only") or client.get("expired")):
-            return {"status": "spectator", "position": -1, "remaining_seconds": 0}
+            return {"status": "spectator", "position": -1, "remaining_seconds": 0, "muted": muted}
         if cid == self.active_id:
-            return {"status": "active", "position": 0, "remaining_seconds": self.active_remaining()}
+            return {"status": "active", "position": 0, "remaining_seconds": self.active_remaining(), "muted": muted}
         if cid in self.queue:
             return {"status": "waiting", "position": self.queue.index(cid) + 1,
-                    "remaining_seconds": 0}
-        return {"status": "idle", "position": -1, "remaining_seconds": 0}
+                    "remaining_seconds": 0, "muted": muted}
+        return {"status": "idle", "position": -1, "remaining_seconds": 0, "muted": muted}
 
     @staticmethod
     def _safe_label(c: dict) -> str:

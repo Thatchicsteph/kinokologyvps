@@ -4,11 +4,19 @@ import { MicOff, Mic, ChevronUp, ChevronDown, Plus, Minus } from "lucide-react";
 
 export function LiveQueue({ active, queue, you, onMute, onMove, onExtend }) {
   const [extendMins, setExtendMins] = useState(5);
+  // Colour-code the active guest's remaining time: red under 30s, amber under 2min, else purple.
+  const timeColor = (sec) => {
+    if (sec == null) return "text-[var(--kink-purple)]";
+    if (sec <= 30) return "text-[var(--kink-red,#ff5c73)]";
+    if (sec <= 120) return "text-[#ffb454]";
+    return "text-[var(--kink-purple)]";
+  };
   const rows = [];
   if (active) {
     rows.push({
       key: "active", label: active.label || "Guest", isActive: true,
       sub: fmtTime(active.remaining_seconds),
+      remainSec: active.remaining_seconds,
       code: active.code, muted: !!active.muted,
     });
   }
@@ -127,7 +135,11 @@ export function LiveQueue({ active, queue, you, onMute, onMove, onExtend }) {
                 {r.muted ? <MicOff size={14} /> : <Mic size={14} />}
               </button>
             )}
-            <span className={`font-mono-data text-sm tabular-nums ${r.isActive ? "text-[var(--kink-purple)]" : "text-[var(--kink-muted)]"}`}>
+            <span className={`font-mono-data text-sm tabular-nums ${
+              r.isActive
+                ? `${timeColor(r.remainSec)}${r.remainSec != null && r.remainSec <= 30 ? " animate-pulse font-semibold" : ""}`
+                : "text-[var(--kink-muted)]"
+            }`}>
               {r.sub}
             </span>
           </div>

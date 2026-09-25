@@ -1,0 +1,527 @@
+import React, { useEffect, useRef, useState } from "react";
+import { useParams, useNavigate } from "react-router-dom";
+import { api, WS_BASE, fmtTime } from "@/lib/api";
+import { ControlConsole } from "@/components/ControlConsole";
+import { TimerDisplay } from "@/components/TimerDisplay";
+import { ObsStream } from "@/components/ObsStream";
+import { GuestToys } from "@/components/GuestToys";
+import { ChatPanel } from "@/components/ChatPanel";
+import { FloatingReactions } from "@/components/FloatingReactions";
+import { ReactionBar } from "@/components/ReactionBar";
+import { NicknamePrompt } from "@/components/NicknamePrompt";
+import { SessionRecap } from "@/components/SessionRecap";
+import { applyTheme } from "@/components/ThemeSync";
+import { Loader2, XCircle, Clock, Users, Settings2, MicOff } from "lucide-react";
+import kinkologyMark from "@/assets/kinkology-mark.png";
+import { toast } from "sonner";
+import { createPanelLayout } from "@/lib/panelLayout";
+
+// Guest control-page panels + their default arrangement. Uses the same layout
+// engine as the admin dashboard (drag-reorder, hide, column count, double-width),
+// persisted separately in this browser under the "kinkology_guest" namespace.
+const GUEST_PANEL_DEFS = {
+  "stream": { label: "Live Stream" },
+  "timer": { label: "Time Remaining" },
+  "controls": { label: "Controls" },
+  "chat": { label: "Chat" },
+};
+const GUEST_DEFAULT_ORDER = {
+  // Matches the owner-configured default: 5-column grid.
+  // Top full-width row = Time Remaining + Chat. Column 1 = Stream (3 wide),
+  // Column 2 = Controls (2 wide), columns 3-5 empty.
+  zones: [
+    ["timer", "chat"],   // zone 0 = full-width top
+    ["stream"],          // column 1
+    ["controls"],        // column 2
+    [],                  // column 3
+    [],                  // column 4
+    [],                  // column 5
+  ],
+};
+const GUEST_DEFAULT_WIDTHS = { stream: 3, controls: 2 };
+const guestLayout = createPanelLayout({
+  storagePrefix: "kinkology_guest_v4",
+  panelDefs: GUEST_PANEL_DEFS,
+  defaultOrder: GUEST_DEFAULT_ORDER,
+  defaultColumns: 5,
+  defaultWidths: GUEST_DEFAULT_WIDTHS,
+});
+
+const Shell = ({ code, wide = false, children }) => (
+  <div
+    className={`relative z-10 min-h-screen flex flex-col mx-auto px-4 sm:px-6 2xl:px-10 py-5 sm:py-8 ${
+      wide ? "max-w-[1800px] w-full" : "max-w-lg"
+    }`}
+  >
+    <header className="flex items-center justify-between mb-5 sm:mb-8">
+      <div className="flex items-center gap-2">
+        <img src={kinkologyMark} alt="Kinkology" style={{ height: 18, width: 18 }} className="rounded-sm" />
+        <span className="font-display font-black tracking-[0.2em] text-sm">KINKOLOGY</span>
+      </div>
+      <span className="font-mono-data text-xs text-[var(--kink-muted)]">CODE {code}</span>
+    </header>
+    {children}
+  </div>
+);
+
+// Persistent banner shown while the owner has this guest muted in chat. Unlike
+// the one-time toast, this stays visible above the chat box the whole time
+// they're muted (and survives refresh/reconnect, since it's driven by the
+// server-side `you.muted` flag).
+const MuteBanner = ({ muted }) => {
+  if (!muted) return null;
+  return (
+    <div
+      data-testid="mute-banner"
+      role="status"
+      className="flex items-center gap-2 px-3 py-2 mb-3 border border-[var(--kink-red,#ff5c73)]/40 bg-[var(--kink-red,#ff5c73)]/[0.08] text-[var(--kink-red,#ff5c73)]"
+    >
+      <MicOff size={15} className="shrink-0" />
+      <span className="font-mono-data text-[11px] sm:text-xs leading-snug">
+        You've been muted by the owner — your messages won't be shown.
+      </span>
+    </div>
+  );
+};
+
+export default function GuestControl() {
+  const { code } = useParams();
+  const navigate = useNavigate();
+  const [phase, setPhase] = useState("checking"); // checking|invalid|connecting|waiting|active|ended
+  const [meta, setMeta] = useState(null);
+  const { layout: gLayout, setColumnCount: gSetColumnCount, setZoneOrder: gSetZoneOrder, moveToZone: gMoveToZone, toggleHidden: gToggleHidden, resetLayout: gResetLayout } = guestLayout.usePanelLayout();
+  const { collapsed: gCollapsed, toggle: gToggleCollapse } = guestLayout.usePanelCollapse();
+  const { widths: gWidths, cycle: gCycleWidth } = guestLayout.usePanelWidth();
+  const [gCustomizerOpen, setGCustomizerOpen] = useState(false);
+  const [snap, setSnap] = useState({ you: null, active: null, queue: [], host_connected: false });
+  const [chatMsgs, setChatMsgs] = useState([]);
+  const [presence, setPresence] = useState(null);
+  const [reactions, setReactions] = useState([]);
+  const [nickname, setNickname] = useState(() => {
+    try { return window.sessionStorage.getItem(`kinkology_nick_${code}`) || ""; } catch (_) { return ""; }
+  });
+  const [needsNickname, setNeedsNickname] = useState(false);
+  const [recap, setRecap] = useState(null);
+  const [resumeState, setResumeState] = useState(null); // last known telemetry for reconnect
+  const wsRef = useRef(null);
+  const wsRetryRef = useRef({ attempt: 0, timer: null, cancelled: false });
+
+  useEffect(() => {
+    let active = true;
+    api.get(`/access/${code}`).then(({ data }) => {
+      if (!active) return;
+      if (!data.valid) { setPhase("invalid"); return; }
+      setMeta(data);
+      connectWs();
+    }).catch(() => active && setPhase("invalid"));
+    return () => {
+      active = false;
+      wsRetryRef.current.cancelled = true;
+      if (wsRetryRef.current.timer) { clearTimeout(wsRetryRef.current.timer); wsRetryRef.current.timer = null; }
+      if (wsRef.current) wsRef.current.close();
+    };
+    // eslint-disable-next-line
+  }, [code]);
+
+  // Show the nickname prompt on first WS state as long as the user hasn't
+  // already saved or skipped it for this code.
+  useEffect(() => {
+    if (!snap?.you) return;
+    let saved = "";
+    try { saved = window.sessionStorage.getItem(`kinkology_nick_${code}`) || ""; } catch (_) {}
+    if (!saved) setNeedsNickname(true);
+  }, [snap?.you, code]);
+
+  const connectWs = () => {
+    setPhase((p) => (p === "connecting" || p === "active" || p === "waiting" ? p : "connecting"));
+    const ws = new WebSocket(`${WS_BASE}/api/ws/control/${code}`);
+    wsRef.current = ws;
+    ws.onmessage = (ev) => {
+      const msg = JSON.parse(ev.data);
+      if (msg.type === "rejected") { setPhase("invalid"); return; }
+      if (msg.type === "reconnected") {
+        // Grace-period reconnect: our turn is still live, machine is paused.
+        // Restore the console to the last known depth/stroke/sensation/pattern
+        // so the user can resume from where they left off.
+        if (msg.depth !== undefined) {
+          setResumeState({
+            depth: msg.depth,
+            stroke: msg.stroke,
+            sensation: msg.sensation,
+            pattern: msg.pattern ?? 0,
+          });
+        }
+        toast.success("Reconnected — press START to resume.");
+        setPhase("active");
+        return;
+      }
+      if (msg.type === "ping") return; // server liveness probe — no action needed
+      if (msg.type === "chat_muted_notice") {
+        toast.warning("You've been muted by the owner — your messages won't be shown.");
+        return;
+      }
+      if (msg.type === "revoked") {
+        // Owner revoked or deleted this access code — remove the guest entirely.
+        toast.error("Your access code was revoked by the owner.");
+        setPhase("ended");
+        try { wsRef.current && wsRef.current.close(); } catch (_) {}
+        return;
+      }
+      if (msg.type === "turn_ended" || msg.type === "expired") {
+        // Time's up (or manual boot) — check whether the server is keeping
+        // the socket open so we downgrade to spectator instead of showing
+        // "session ended" and closing the page.
+        if (msg.keep_connection) {
+          toast.info("Time's up — you can still watch and chat.");
+          setSnap((prev) => prev ? { ...prev, you: { ...(prev.you || {}), status: "spectator", remaining_seconds: 0 } } : prev);
+          setPhase("spectator");
+        } else {
+          toast.info(msg.reason === "time_up" ? "Your time is up." : "Your turn has ended.");
+          setPhase("ended");
+        }
+        return;
+      }
+      if (msg.type === "state") {
+        setSnap(msg);
+        if (msg.you?.status === "active") setPhase("active");
+        else if (msg.you?.status === "spectator") setPhase("spectator");
+        else setPhase("waiting");
+      }
+      if (msg.type === "chat_history") setChatMsgs(msg.messages || []);
+      if (msg.type === "chat_msg") setChatMsgs((prev) => [...prev, msg.message].slice(-50));
+      if (msg.type === "chat_react") {
+        setChatMsgs((prev) => prev.map((m) => (m.id === msg.msg_id ? { ...m, reactions: msg.reactions } : m)));
+      }
+      if (msg.type === "chat_cleared") setChatMsgs([]);
+      if (msg.type === "chat_delete") setChatMsgs((prev) => prev.filter((m) => m.id !== msg.msg_id));
+      if (msg.type === "presence") setPresence(msg);
+      if (msg.type === "reaction") setReactions((prev) => [...prev.slice(-24), msg]);
+      if (msg.type === "theme") applyTheme(msg.theme);
+      if (msg.type === "session_recap") setRecap(msg.recap);
+    };
+    ws.onopen = () => {
+      wsRetryRef.current.attempt = 0;
+      // If we already know a nickname (returning viewer, or user set it below),
+      // push it on every reconnect so the server label stays sticky.
+      if (nickname) {
+        try { ws.send(JSON.stringify({ type: "set_nickname", name: nickname })); } catch (_) {}
+      }
+    };
+    ws.onclose = () => {
+      if (wsRetryRef.current.cancelled) return;
+      setPhase((p) => (p === "ended" || p === "invalid" ? p : "reconnecting"));
+      // Exponential backoff capped at 15s. Skips retry when the session ended
+      // legitimately (time_up / invalid code) — those states short-circuit above.
+      const state = wsRetryRef.current;
+      if (state.cancelled) return;
+      state.attempt = Math.min(state.attempt + 1, 6);
+      const delay = Math.min(15000, 1000 * 2 ** (state.attempt - 1));
+      if (state.timer) clearTimeout(state.timer);
+      state.timer = setTimeout(() => {
+        if (!wsRetryRef.current.cancelled) connectWs();
+      }, delay);
+    };
+    ws.onerror = () => {};
+  };
+
+  const sendCommand = (cmd) => {
+    if (wsRef.current && wsRef.current.readyState === 1) {
+      wsRef.current.send(JSON.stringify({ type: "command", cmd }));
+    }
+  };
+
+  const sendToyCommand = (cmd) => {
+    if (wsRef.current && wsRef.current.readyState === 1) {
+      wsRef.current.send(JSON.stringify({ type: "toy_command", cmd }));
+    }
+  };
+
+  const sendChat = (text) => {
+    if (wsRef.current && wsRef.current.readyState === 1) {
+      wsRef.current.send(JSON.stringify({ type: "chat", text }));
+    }
+  };
+
+  const sendTyping = () => {
+    if (wsRef.current && wsRef.current.readyState === 1) {
+      wsRef.current.send(JSON.stringify({ type: "typing" }));
+    }
+  };
+
+  const sendReaction = (emoji) => {
+    if (wsRef.current && wsRef.current.readyState === 1) {
+      wsRef.current.send(JSON.stringify({ type: "reaction", emoji }));
+    }
+  };
+
+  const sendChatReact = (msgId, emoji) => {
+    if (wsRef.current && wsRef.current.readyState === 1) {
+      wsRef.current.send(JSON.stringify({ type: "chat_react", msg_id: msgId, emoji }));
+    }
+  };
+
+  const submitNickname = (name) => {
+    setNickname(name);
+    try { window.sessionStorage.setItem(`kinkology_nick_${code}`, name); } catch (_) {}
+    if (wsRef.current && wsRef.current.readyState === 1) {
+      wsRef.current.send(JSON.stringify({ type: "set_nickname", name }));
+    }
+    setNeedsNickname(false);
+  };
+
+  const skipNickname = () => {
+    try { window.sessionStorage.setItem(`kinkology_nick_${code}`, "__skipped__"); } catch (_) {}
+    setNeedsNickname(false);
+  };
+
+  if (phase === "checking" || phase === "connecting" || phase === "reconnecting") {
+    return (
+      <Shell code={code}>
+        <div className="flex-1 flex flex-col items-center justify-center gap-4 text-[var(--kink-text-2)]">
+          <Loader2 className="animate-spin text-[var(--kink-purple)]" size={32} />
+          <p className="font-mono-data text-sm">
+            {phase === "reconnecting" ? "Connection dropped — reconnecting…" : "Connecting to the bridge…"}
+          </p>
+        </div>
+      </Shell>
+    );
+  }
+
+  if (phase === "invalid") {
+    return (
+      <Shell code={code}>
+        <div className="flex-1 flex flex-col items-center justify-center gap-4 text-center" data-testid="invalid-state">
+          <XCircle className="text-[var(--kink-danger)]" size={40} />
+          <h2 className="font-display font-black uppercase tracking-[0.05em] text-xl">Code not valid</h2>
+          <p className="text-[var(--kink-text-2)] text-sm max-w-xs">
+            This access code is invalid, revoked, or out of time. Ask the owner for a new one.
+          </p>
+          <button onClick={() => navigate("/")} className="mt-2 font-mono-data text-xs text-[var(--kink-purple)]">← BACK</button>
+        </div>
+      </Shell>
+    );
+  }
+
+  if (phase === "ended") {
+    return (
+      <Shell code={code}>
+        <div className="flex-1 flex flex-col items-center justify-center gap-4 text-center" data-testid="ended-state">
+          <Clock className="text-[var(--kink-purple)]" size={40} />
+          <h2 className="font-display font-black uppercase tracking-[0.05em] text-xl">Session ended</h2>
+          <p className="text-[var(--kink-text-2)] text-sm max-w-xs">Your control time has ended.</p>
+          <button onClick={() => window.location.reload()} data-testid="reconnect-button" className="mt-2 font-mono-data text-xs text-[var(--kink-purple)]">RECONNECT →</button>
+        </div>
+      </Shell>
+    );
+  }
+
+  if (phase === "waiting") {
+    const pos = snap.you?.position ?? 0;
+    return (
+      <>
+      <Shell code={code} wide>
+        <div
+          className="flex-1 grid gap-5 lg:gap-6 lg:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)] lg:items-start"
+          data-testid="waiting-state"
+        >
+          <div className="space-y-4">
+            <div className="relative" data-testid="stream-container">
+              <ObsStream />
+              <FloatingReactions reactions={reactions} />
+            </div>
+            <ReactionBar onReact={sendReaction} />
+          </div>
+          <div className="space-y-4 lg:sticky lg:top-6">
+            <div className="hud-panel px-6 sm:px-10 py-8 sm:py-14 w-full text-center">
+              <Users className="text-[var(--kink-purple)] mx-auto" size={32} />
+              <p className="font-display text-xs tracking-[0.2em] text-[var(--kink-text-2)] mt-4">YOU ARE IN THE QUEUE</p>
+              <p
+                className="font-mono-data font-extrabold text-5xl sm:text-7xl lg:text-8xl text-[var(--kink-purple)] text-glow-purple mt-3"
+                data-testid="queue-position"
+              >
+                #{pos}
+              </p>
+              <p className="text-[var(--kink-text-2)] text-sm mt-4">
+                {snap.active ? (
+                  <>In control now: <span className="text-white">{snap.active.label}</span> · {fmtTime(snap.active.remaining_seconds)} left</>
+                ) : (
+                  "Waiting for the device host…"
+                )}
+              </p>
+              {!snap.host_connected && (
+                <p className="font-mono-data text-xs text-[var(--kink-danger)] mt-4">⚠ Device host offline</p>
+              )}
+            </div>
+            {snap.featured && (
+              <div className="hud-panel p-5 sm:p-6" data-testid="featured-session">
+                <div className="flex items-center justify-between">
+                  <span className="font-display text-xs tracking-[0.15em] text-[var(--kink-text-2)]">★ FEATURED SESSION</span>
+                  {snap.replaying && (
+                    <span className="flex items-center gap-1.5 font-mono-data text-[10px] uppercase tracking-wide text-[var(--kink-purple)]">
+                      <span className="h-2 w-2 rounded-full bg-[var(--kink-purple)] pulse-dot" /> Now playing
+                    </span>
+                  )}
+                </div>
+                <p className="text-white text-sm mt-2">{snap.featured.label}</p>
+                <p className="font-mono-data text-[11px] text-[var(--kink-muted)] mt-1">
+                  {fmtTime(snap.featured.duration_seconds)} · {snap.replaying ? "playing on the device now — watch the stream" : "the host can replay this live"}
+                </p>
+              </div>
+            )}
+            <div className="hud-panel p-5 sm:p-6">
+              <MuteBanner muted={snap.you?.muted} />
+              <ChatPanel
+                messages={chatMsgs}
+                onSend={sendChat}
+                selfLabel={snap.label || "Guest"}
+                title="CHAT"
+                compact
+                presence={presence}
+                onTyping={sendTyping}
+                onReact={sendChatReact}
+              />
+            </div>
+          </div>
+        </div>
+      </Shell>
+      {needsNickname && <NicknamePrompt onSubmit={submitNickname} onSkip={skipNickname} />}
+      {recap && <SessionRecap recap={recap} onClose={() => setRecap(null)} />}
+    </>
+    );
+  }
+
+  // Spectator: view-only code, or a control code whose time ran out. Same
+  // layout as active but without the control console and toy remote.
+  if (phase === "spectator" || snap.you?.status === "spectator") {
+    return (
+      <>
+      <Shell code={code} wide>
+        <div
+          className="fade-up grid gap-4 lg:gap-6 lg:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)] lg:items-start"
+          data-testid="spectator-state"
+        >
+          <div className="space-y-4">
+            <div className="relative" data-testid="stream-container">
+              <ObsStream />
+              <FloatingReactions reactions={reactions} />
+            </div>
+            <ReactionBar onReact={sendReaction} />
+          </div>
+          <div className="space-y-4 lg:sticky lg:top-6">
+            <div className="hud-panel p-5 sm:p-6 text-center">
+              <span
+                data-testid="spectator-badge"
+                className="inline-block font-display text-[10px] tracking-[0.2em] text-[var(--kink-purple)] border border-[var(--kink-purple)]/40 px-3 py-1"
+              >
+                VIEW ONLY
+              </span>
+              <p className="text-[var(--kink-text-2)] text-sm mt-3">
+                You can watch and chat. Ask the owner for a control code to take the wheel.
+              </p>
+            </div>
+            <div className="hud-panel p-5 sm:p-6">
+              <MuteBanner muted={snap.you?.muted} />
+              <ChatPanel
+                messages={chatMsgs}
+                onSend={sendChat}
+                selfLabel={snap.label || "Guest"}
+                title="CHAT"
+                compact
+                presence={presence}
+                onTyping={sendTyping}
+                onReact={sendChatReact}
+              />
+            </div>
+          </div>
+        </div>
+      </Shell>
+      {needsNickname && <NicknamePrompt onSubmit={submitNickname} onSkip={skipNickname} />}
+      {recap && <SessionRecap recap={recap} onClose={() => setRecap(null)} />}
+      </>
+    );
+  }
+
+  // active
+  return (
+    <>
+    <Shell code={code} wide>
+      <div className="flex justify-end mb-3">
+        <button onClick={() => setGCustomizerOpen(true)} data-testid="guest-open-customizer"
+          className="flex items-center gap-1.5 font-mono-data text-xs text-[var(--kink-text-2)] hover:text-[var(--kink-purple)] transition-colors">
+          <Settings2 size={14} /> CUSTOMIZE
+        </button>
+      </div>
+      <div className="fade-up">
+        <guestLayout.PanelGrid
+          layout={gLayout}
+          collapsed={gCollapsed}
+          onToggleCollapse={gToggleCollapse}
+          widths={gWidths}
+          panelNodes={{
+            "stream": (
+              <div key="guest-stream-panel">
+                <div className="relative" data-testid="stream-container">
+                  <ObsStream />
+                  <FloatingReactions reactions={reactions} />
+                </div>
+                <ReactionBar onReact={sendReaction} />
+              </div>
+            ),
+            "timer": (
+              <div className="hud-panel p-5 sm:p-6 flex flex-col items-center" key="guest-timer-panel">
+                <TimerDisplay seconds={snap.you?.remaining_seconds ?? 0} />
+                {!snap.host_connected && (
+                  <p className="font-mono-data text-xs text-[var(--kink-danger)] mt-3 text-center">
+                    ⚠ Device host offline — commands may not apply
+                  </p>
+                )}
+              </div>
+            ),
+            "chat": (
+              <div className="hud-panel p-5 sm:p-6" key="guest-chat-panel">
+                <MuteBanner muted={snap.you?.muted} />
+                <ChatPanel
+                  messages={chatMsgs}
+                  onSend={sendChat}
+                  selfLabel={snap.label || "You"}
+                  title="CHAT"
+                  compact
+                  presence={presence}
+                  onTyping={sendTyping}
+                  onReact={sendChatReact}
+                />
+              </div>
+            ),
+            "controls": (
+              <div className="hud-panel p-5 sm:p-6 space-y-5" key="guest-controls-panel">
+                <ControlConsole onCommand={sendCommand} disabled={false} autoStart={!resumeState} limits={snap.limits} initialState={resumeState} />
+                {snap.toys?.available && (
+                  <GuestToys
+                    onCommand={sendToyCommand}
+                    activePattern={snap.toys?.pattern || null}
+                    locked={!!snap.toys?.locked}
+                  />
+                )}
+              </div>
+            ),
+          }}
+        />
+      </div>
+    </Shell>
+    <guestLayout.PanelCustomizer
+      open={gCustomizerOpen}
+      onClose={() => setGCustomizerOpen(false)}
+      layout={gLayout}
+      setColumnCount={gSetColumnCount}
+      setZoneOrder={gSetZoneOrder}
+      moveToZone={gMoveToZone}
+      toggleHidden={gToggleHidden}
+      resetLayout={gResetLayout}
+      widths={gWidths}
+      onToggleWidth={gCycleWidth}
+    />
+    {needsNickname && <NicknamePrompt onSubmit={submitNickname} onSkip={skipNickname} />}
+    {recap && <SessionRecap recap={recap} onClose={() => setRecap(null)} />}
+    </>
+  );
+}
