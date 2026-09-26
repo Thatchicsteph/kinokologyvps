@@ -373,6 +373,33 @@ class Hub:
             "peak_speed_percent": max(samples) if samples else 0,
         }
 
+    async def _save_session_history(self, cid: str, reason: str) -> None:
+        """Persist the turn's recap stats to the `session_history` collection so
+        the owner can review past turns. Best-effort: swallows DB errors and never
+        blocks turn teardown. Written once per turn as it ends, from the same recap
+        the guest sees, plus who/when/why. Skips a turn that consumed no time."""
+        stats = self.session_stats.get(cid) or {}
+        recap = self._build_recap(cid)
+        if recap.get("used_seconds", 0) <= 0:
+            return  # nothing meaningful to record (e.g. an instantly-ended turn)
+        client = self.clients.get(cid) or {}
+        try:
+            await db.session_history.insert_one({
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "label": client.get("label") or "Guest",
+                "code": stats.get("code") or client.get("code") or "",
+                "reason": reason,
+                "used_seconds": recap.get("used_seconds", 0),
+                "granted_seconds": recap.get("granted_seconds", 0),
+                "avg_speed_percent": recap.get("avg_speed_percent", 0),
+                "peak_speed_percent": recap.get("peak_speed_percent", 0),
+                "chat_count": recap.get("chat_count", 0),
+                "reactions_total": recap.get("reactions_total", 0),
+                "reactions_top": recap.get("reactions_top", []),
+            })
+        except Exception as e:
+            logger.warning("failed to save session history: %s", e)
+
     async def _save_recording(self, cid: str, reason: str) -> None:
         """Persist the turn's telemetry track to the `recordings` collection.
         Best-effort: swallows DB errors and never blocks turn teardown. Skips
@@ -668,6 +695,8 @@ class Hub:
             # Ship the end-of-turn recap BEFORE we flip the guest into
             # spectator mode so the card renders while they still have context.
             await self._emit_recap(cid, reason)
+            # Persist the same recap to session history for the owner's dashboard.
+            await self._save_session_history(cid, reason)
             # When the guest's time runs out, we DON'T disconnect them anymore
             # — they demote to view-only spectators (still see the stream, chat,
             # and presence). For all other reasons the socket stays too; the

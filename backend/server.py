@@ -873,6 +873,51 @@ async def delete_recording(rec_id: str, user: dict = Depends(get_current_user)):
     return {"ok": True}
 
 # ------------------------------------------------------------------
+# Session history (per-turn recap, for the owner's dashboard)
+# ------------------------------------------------------------------
+def _history_summary(doc: dict) -> dict:
+    return {
+        "id": str(doc["_id"]),
+        "created_at": doc.get("created_at"),
+        "label": doc.get("label", "Guest"),
+        "code": doc.get("code", ""),
+        "reason": doc.get("reason", ""),
+        "used_seconds": doc.get("used_seconds", 0),
+        "granted_seconds": doc.get("granted_seconds", 0),
+        "avg_speed_percent": doc.get("avg_speed_percent", 0),
+        "peak_speed_percent": doc.get("peak_speed_percent", 0),
+        "chat_count": doc.get("chat_count", 0),
+        "reactions_total": doc.get("reactions_total", 0),
+        "reactions_top": doc.get("reactions_top", []),
+    }
+
+@api_router.get("/session-history")
+async def list_session_history(user: dict = Depends(get_current_user)):
+    """Recent turns, newest first, plus roll-up totals for the dashboard header."""
+    docs = await db.session_history.find({}).sort("created_at", -1).to_list(length=200)
+    rows = [_history_summary(d) for d in docs]
+    total_turns = len(rows)
+    total_seconds = sum(r["used_seconds"] for r in rows)
+    peaks = [r["peak_speed_percent"] for r in rows if r["peak_speed_percent"] > 0]
+    avgs = [r["avg_speed_percent"] for r in rows if r["avg_speed_percent"] > 0]
+    summary = {
+        "total_turns": total_turns,
+        "total_seconds": total_seconds,
+        "avg_turn_seconds": int(total_seconds / total_turns) if total_turns else 0,
+        "peak_speed_percent": max(peaks) if peaks else 0,
+        "avg_speed_percent": int(sum(avgs) / len(avgs)) if avgs else 0,
+        "total_reactions": sum(r["reactions_total"] for r in rows),
+        "total_chat": sum(r["chat_count"] for r in rows),
+    }
+    return {"summary": summary, "sessions": rows}
+
+@api_router.delete("/session-history/{hist_id}")
+async def delete_session_history(hist_id: str, user: dict = Depends(get_current_user)):
+    await db.session_history.delete_one({"_id": parse_object_id(hist_id)})
+    await log_event("session", "history_deleted", actor=user["email"], target=hist_id)
+    return {"ok": True}
+
+# ------------------------------------------------------------------
 # WebSockets
 # ------------------------------------------------------------------
 @app.websocket("/api/ws/host")
