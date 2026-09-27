@@ -281,17 +281,34 @@ export function ControlConsole({ onCommand, disabled = false, autoStart = false,
       const t = (Date.now() - start) / 1000;
       let speed = stateRef.current.speed;
       let depth = stateRef.current.depth;
+      let stroke = stateRef.current.stroke;
+      let sensation = stateRef.current.sensation;
       let sendDepth = false;
+      let sendStrokeSensation = false;
       if (patProg) {
-        // Speed follows the pattern's real waveform. Depth moves on its OWN
-        // slower, independent rhythm across the owner's band, so a stroke no
-        // longer shortens every time speed dips — the two feel decoupled.
-        // ~14s depth cycle (a slow sine) vs the pattern's own fast shape.
+        // All FOUR axes move, each on its own rhythm so they layer rather than
+        // lockstep. Every axis maps into the owner's allowed range and passes
+        // through the clamps below, which are the final limit guard.
+        //   speed     — the pattern's real waveform (its identity)
+        //   depth     — slow ~14s sine across [minDepth, maxDepth]
+        //   stroke    — ~9s sine across the safe stroke range (0..depth-minDepth)
+        //   sensation — very slow ~19s sine across 0..100
         const intensity = Math.min(1, Math.max(0, patProg.intensityAt(t * 1000)));
         speed = intensity * maxSpeed;
+
         const depth01 = 0.5 - 0.5 * Math.cos((t % 14) / 14 * 2 * Math.PI);
         depth = minDepth + depth01 * (maxDepth - minDepth);
+
+        // stroke's safe ceiling depends on the depth we just chose this tick.
+        const stroke01 = 0.5 - 0.5 * Math.cos((t % 9) / 9 * 2 * Math.PI);
+        const maxStrokeNow = Math.max(0, Math.round(depth) - minDepth);
+        stroke = stroke01 * maxStrokeNow;
+
+        const sens01 = 0.5 - 0.5 * Math.cos((t % 19) / 19 * 2 * Math.PI);
+        sensation = sens01 * 100;
+
         sendDepth = true;
+        sendStrokeSensation = true;
       } else {
       switch (pid) {
         case "wave":
@@ -323,9 +340,19 @@ export function ControlConsole({ onCommand, disabled = false, autoStart = false,
       }
       speed = clampSpeed(speed);
       depth = clampDepth(depth);
-      setState((s) => ({ ...s, speed, depth }));
-      onCommand(cmd.speed(speed));
-      if (sendDepth) onCommand(cmd.depth(depth));
+      if (sendStrokeSensation) {
+        stroke = clampStroke(stroke, depth);
+        sensation = Math.min(100, Math.max(0, Math.round(sensation)));
+        setState((s) => ({ ...s, speed, depth, stroke, sensation }));
+        onCommand(cmd.speed(speed));
+        onCommand(cmd.depth(depth));
+        onCommand(cmd.stroke(stroke));
+        onCommand(cmd.sensation(sensation));
+      } else {
+        setState((s) => ({ ...s, speed, depth }));
+        onCommand(cmd.speed(speed));
+        if (sendDepth) onCommand(cmd.depth(depth));
+      }
     }, 250);
   };
 
