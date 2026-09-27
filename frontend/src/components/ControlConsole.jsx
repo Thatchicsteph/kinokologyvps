@@ -4,6 +4,7 @@ import { Gauge, Ruler, Waves, Move3d, Power, Square, Zap, Lock, Bookmark, Trash2
 import { PATTERNS, cmd } from "@/lib/ossm";
 import { loadPresets, savePreset, deletePreset } from "@/lib/guestPresets";
 import { VIBRATION_PATTERNS, getPattern, categoryOf, PATTERN_CATEGORIES } from "@/lib/vibrationPatterns";
+import { PatternDiagram, PatternSparkline } from "@/components/PatternDiagram";
 
 const ICONS = { speed: Gauge, depth: Move3d, stroke: Ruler, sensation: Waves };
 
@@ -106,6 +107,7 @@ export function ControlConsole({ onCommand, disabled = false, autoStart = false,
 
   const [running, setRunning] = useState(false);
   const [activeProgram, setActiveProgram] = useState(null);
+  const [hoveredProgram, setHoveredProgram] = useState(null); // pattern chip under the cursor, for the diagram preview
   const [state, setState] = useState(() => ({
     speed: 0,
     depth: Math.max(initialState?.depth ?? 0, minDepth),
@@ -463,28 +465,57 @@ export function ControlConsole({ onCommand, disabled = false, autoStart = false,
         <span className="font-display text-xs tracking-[0.15em] text-[var(--kink-text-2)] flex items-center gap-2 mb-3">
           <Zap size={14} className="text-[var(--kink-purple)]" /> AUTO PROGRAMS
         </span>
-        <div className="space-y-3">
+
+        {/* Virtual-device diagram — always shown. Priority: the running pattern
+            program, else the pattern chip under the cursor, else a parked
+            preview of the first pattern. Animates when active OR hovered. */}
+        {(() => {
+          const activePat = activeProgram && activeProgram.startsWith("pat_") ? activeProgram.slice(4) : null;
+          const previewId = activePat || hoveredProgram || PATTERN_PROGRAMS[0]?.patternId;
+          if (!previewId) return null;
+          const shownProg = activePat
+            ? ALL_PROGRAMS.find((p) => p.id === activeProgram)
+            : PATTERN_PROGRAMS.find((p) => p.patternId === previewId);
+          return (
+            <div className="mb-4">
+              <PatternDiagram
+                patternId={previewId}
+                name={shownProg?.name || ""}
+                running={!!activePat || !!hoveredProgram}
+                mode={activePat ? "running" : hoveredProgram ? "preview" : "rest"}
+              />
+            </div>
+          );
+        })()}
+
+        <div className="space-y-4">
           {PROGRAM_GROUPS.map((group) => (
             <div key={group.key}>
-              <span className="font-mono-data text-[10px] uppercase tracking-wide text-[var(--kink-muted)] block mb-1.5">
+              <span className="font-mono-data text-[10px] uppercase tracking-wide text-[var(--kink-muted)] block mb-2">
                 {group.label}
               </span>
-              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                {group.programs.map((p) => (
-                  <button
-                    key={p.id}
-                    onClick={() => runProgram(p.id)}
-                    data-testid={`program-${p.id}`}
-                    className={`text-left px-3 py-2.5 border transition-colors duration-200 ${
-                      activeProgram === p.id
-                        ? "border-[var(--kink-purple)] bg-[var(--kink-purple)]/[0.12] text-white glow-purple"
-                        : "border-[var(--kink-overlay)] text-[var(--kink-text-2)] hover:border-[var(--kink-purple)]/40"
-                    }`}
-                  >
-                    <span className="block text-sm font-medium">{p.name}</span>
-                    <span className="block font-mono-data text-[10px] text-[var(--kink-muted)] mt-0.5">{p.desc}</span>
-                  </button>
-                ))}
+              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
+                {group.programs.map((p) => {
+                  const active = activeProgram === p.id;
+                  return (
+                    <button
+                      key={p.id}
+                      onClick={() => runProgram(p.id)}
+                      onMouseEnter={() => p.patternId && setHoveredProgram(p.patternId)}
+                      onMouseLeave={() => setHoveredProgram((h) => (h === p.patternId ? null : h))}
+                      data-testid={`program-${p.id}`}
+                      title={p.desc}
+                      className={`flex items-center justify-between gap-2 px-3 py-2 border text-left transition-colors duration-200 ${
+                        active
+                          ? "border-[var(--kink-purple)] bg-[var(--kink-purple)]/[0.12] text-white glow-purple"
+                          : "border-[var(--kink-overlay)] text-[var(--kink-text-2)] hover:border-[var(--kink-purple)]/40"
+                      }`}
+                    >
+                      <span className="text-xs font-medium truncate">{p.name}</span>
+                      {p.patternId && <PatternSparkline patternId={p.patternId} />}
+                    </button>
+                  );
+                })}
               </div>
             </div>
           ))}
