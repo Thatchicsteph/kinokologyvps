@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ButtplugClient, DEFAULT_INTIFACE_WS } from "@/lib/buttplug";
+import { VirtualToyClient } from "@/lib/virtualToy";
 import { getPattern } from "@/lib/vibrationPatterns";
 import { toast } from "sonner";
 
@@ -15,6 +16,8 @@ export function useToys({ onStatusChange } = {}) {
   const [connected, setConnected] = useState(false);
   const [devices, setDevices] = useState([]);
   const [linked, setLinkedState] = useState(true); // mirror OSSM SPEED as vibration intensity
+  const [isVirtual, setIsVirtual] = useState(false); // connected to the software test device
+  const [virtualLevels, setVirtualLevels] = useState({}); // index -> 0..1, live readout for the mock
 
   const [activePattern, setActivePattern] = useState(null); // pattern id, or null
   const patternRef = useRef({ intervalId: null, startedAt: 0 });
@@ -52,12 +55,42 @@ export function useToys({ onStatusChange } = {}) {
     }
   }, [stopPattern]);
 
+  // Connect the in-app software test device — no Intiface, no Bluetooth, no
+  // hardware. Uses the same code path as a real connection afterward, so every
+  // control (sliders, patterns, SPEED-link, guest relay) is exercisable.
+  const connectVirtual = useCallback(async () => {
+    const client = new VirtualToyClient();
+    client.onDevicesChanged = (list) => setDevices(list);
+    client.onDisconnected = () => {
+      setConnected(false);
+      setDevices([]);
+      setIsVirtual(false);
+      setVirtualLevels({});
+      stopPattern();
+    };
+    // Live readout: reflect whatever intensity the app sends to each fake toy.
+    client.onIntensity = ({ index, intensity }) =>
+      setVirtualLevels((prev) => (prev[index] === intensity ? prev : { ...prev, [index]: intensity }));
+    try {
+      await client.connect();
+      await client.startScanning();
+      clientRef.current = client;
+      setConnected(true);
+      setIsVirtual(true);
+      toast.success("Virtual test device connected (Lovense + OSSM)");
+    } catch (e) {
+      toast.error(e.message || "Could not start the virtual test device");
+    }
+  }, [stopPattern]);
+
   const disconnect = useCallback(() => {
     stopPattern();
     clientRef.current?.disconnect();
     clientRef.current = null;
     setConnected(false);
     setDevices([]);
+    setIsVirtual(false);
+    setVirtualLevels({});
   }, [stopPattern]);
 
   const setDeviceIntensity = useCallback((index, value01) => {
@@ -146,6 +179,9 @@ export function useToys({ onStatusChange } = {}) {
     linked,
     setLinked,
     connect,
+    connectVirtual,
+    isVirtual,
+    virtualLevels,
     disconnect,
     setDeviceIntensity,
     stopAllToys,

@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
 import { Vibrate, Square, Play, Lock } from "lucide-react";
-import { VIBRATION_PATTERNS } from "@/lib/vibrationPatterns";
+import { getPatternsByCategory } from "@/lib/vibrationPatterns";
 
 /**
  * Guest-facing toys control. The owner's Intiface connection lives in their
@@ -85,29 +85,38 @@ export function GuestToys({ onCommand, activePattern, locked = false }) {
         <span className="font-mono-data text-[10px] text-[var(--kink-muted)] uppercase tracking-wide block mb-2">
           Patterns
         </span>
-        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2" data-testid="guest-toys-patterns">
-          {VIBRATION_PATTERNS.map((p) => {
-            const active = activePattern === p.id;
-            return (
-              <button
-                key={p.id}
-                onClick={() => {
-                  setIntensity(0);
-                  onCommand(`toy:pattern:${p.id}`);
-                }}
-                data-testid={`guest-toys-pattern-${p.id}`}
-                title={p.description}
-                className={`flex items-center gap-1.5 border px-3 py-2 font-display text-xs tracking-[0.08em] transition-colors ${
-                  active
-                    ? "border-[var(--kink-purple)]/60 text-[var(--kink-purple)] glow-purple"
-                    : "border-[var(--kink-overlay)] text-[var(--kink-text-2)] hover:border-[var(--kink-purple)]/40"
-                }`}
-              >
-                {active ? <Vibrate size={12} className="pulse-dot" /> : <Play size={12} />}{" "}
-                {p.label.toUpperCase()}
-              </button>
-            );
-          })}
+        <div className="space-y-3" data-testid="guest-toys-patterns">
+          {getPatternsByCategory().map((cat) => (
+            <div key={cat.key}>
+              <span className="font-mono-data text-[9px] uppercase tracking-wide text-[var(--kink-muted)] block mb-1.5">
+                {cat.label}
+              </span>
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                {cat.patterns.map((p) => {
+                  const active = activePattern === p.id;
+                  return (
+                    <button
+                      key={p.id}
+                      onClick={() => {
+                        setIntensity(0);
+                        onCommand(`toy:pattern:${p.id}`);
+                      }}
+                      data-testid={`guest-toys-pattern-${p.id}`}
+                      title={p.description}
+                      className={`flex items-center gap-1.5 border px-3 py-2 font-display text-xs tracking-[0.08em] transition-colors ${
+                        active
+                          ? "border-[var(--kink-purple)]/60 text-[var(--kink-purple)] glow-purple"
+                          : "border-[var(--kink-overlay)] text-[var(--kink-text-2)] hover:border-[var(--kink-purple)]/40"
+                      }`}
+                    >
+                      {active ? <Vibrate size={12} className="pulse-dot" /> : <Play size={12} />}{" "}
+                      {p.label.toUpperCase()}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
         </div>
       </div>
       </div>

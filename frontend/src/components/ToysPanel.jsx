@@ -1,7 +1,7 @@
 import React, { useState } from "react";
-import { Vibrate, Link2, Unlink, Power, PlugZap, Square, Play, Lock, Unlock, ChevronUp, ChevronDown } from "lucide-react";
+import { Vibrate, Link2, Unlink, Power, PlugZap, Square, Play, Lock, Unlock, ChevronUp, ChevronDown, TestTube } from "lucide-react";
 import { DEFAULT_INTIFACE_WS } from "@/lib/buttplug";
-import { VIBRATION_PATTERNS } from "@/lib/vibrationPatterns";
+import { getPatternsByCategory } from "@/lib/vibrationPatterns";
 
 function StatusPill({ ok, okText, offText }) {
   return (
@@ -64,6 +64,14 @@ export function ToysPanel({ toys, locked = false, onToggleLock }) {
           )}
           <div className="flex flex-wrap items-center gap-3 mt-3">
             <StatusPill ok={toys.connected} okText="INTIFACE ONLINE" offText="INTIFACE OFFLINE" />
+            {toys.isVirtual && (
+              <span
+                data-testid="toys-virtual-badge"
+                className="inline-flex items-center gap-1.5 font-mono-data text-[10px] tracking-[0.15em] px-2 py-1 border border-[var(--kink-purple)]/50 text-[var(--kink-purple)]"
+              >
+                <TestTube size={11} /> VIRTUAL TEST DEVICE
+              </span>
+            )}
             {toys.connected && (
               <span className="font-mono-data text-xs text-[var(--kink-muted)]" data-testid="toys-found-count">
                 {toys.devices.length} toy{toys.devices.length === 1 ? "" : "s"} found
@@ -132,13 +140,23 @@ export function ToysPanel({ toys, locked = false, onToggleLock }) {
               </button>
             </>
           ) : (
-            <button
-              onClick={() => toys.connect(url)}
-              data-testid="toys-connect-button"
-              className="flex items-center gap-2 bg-[var(--kink-purple)] text-[var(--kink-base)] px-5 py-3 font-display font-bold tracking-[0.1em] glow-purple active:scale-95 transition-transform"
-            >
-              <PlugZap size={16} /> CONNECT TOYS
-            </button>
+            <>
+              <button
+                onClick={() => toys.connect(url)}
+                data-testid="toys-connect-button"
+                className="flex items-center gap-2 bg-[var(--kink-purple)] text-[var(--kink-base)] px-5 py-3 font-display font-bold tracking-[0.1em] glow-purple active:scale-95 transition-transform"
+              >
+                <PlugZap size={16} /> CONNECT TOYS
+              </button>
+              <button
+                onClick={toys.connectVirtual}
+                data-testid="toys-connect-virtual-button"
+                title="Connect an in-app software test device (Virtual Lovense + Virtual OSSM) — no hardware needed"
+                className="flex items-center gap-2 border border-[var(--kink-overlay)] px-4 py-3 font-display text-xs tracking-[0.1em] text-[var(--kink-text-2)] hover:border-[var(--kink-purple)]/40 transition-colors"
+              >
+                <TestTube size={16} /> TEST DEVICE
+              </button>
+            </>
           )}
         </div>
       </div>
@@ -165,25 +183,34 @@ export function ToysPanel({ toys, locked = false, onToggleLock }) {
               </button>
             )}
           </div>
-          <div className="flex flex-wrap gap-2" data-testid="toys-pattern-list">
-            {VIBRATION_PATTERNS.map((p) => {
-              const active = toys.activePattern === p.id;
-              return (
-                <button
-                  key={p.id}
-                  onClick={() => toys.startPattern(p.id)}
-                  data-testid={`toys-pattern-${p.id}`}
-                  title={p.description}
-                  className={`flex items-center gap-1.5 border px-3 py-2 font-display text-xs tracking-[0.08em] transition-colors ${
-                    active
-                      ? "border-[var(--kink-purple)]/60 text-[var(--kink-purple)] glow-purple"
-                      : "border-[var(--kink-overlay)] text-[var(--kink-text-2)] hover:border-[var(--kink-purple)]/40"
-                  }`}
-                >
-                  {active ? <Vibrate size={12} className="pulse-dot" /> : <Play size={12} />} {p.label.toUpperCase()}
-                </button>
-              );
-            })}
+          <div className="space-y-3" data-testid="toys-pattern-list">
+            {getPatternsByCategory().map((cat) => (
+              <div key={cat.key}>
+                <span className="font-mono-data text-[10px] uppercase tracking-wide text-[var(--kink-muted)] block mb-1.5">
+                  {cat.label}
+                </span>
+                <div className="flex flex-wrap gap-2">
+                  {cat.patterns.map((p) => {
+                    const active = toys.activePattern === p.id;
+                    return (
+                      <button
+                        key={p.id}
+                        onClick={() => toys.startPattern(p.id)}
+                        data-testid={`toys-pattern-${p.id}`}
+                        title={p.description}
+                        className={`flex items-center gap-1.5 border px-3 py-2 font-display text-xs tracking-[0.08em] transition-colors ${
+                          active
+                            ? "border-[var(--kink-purple)]/60 text-[var(--kink-purple)] glow-purple"
+                            : "border-[var(--kink-overlay)] text-[var(--kink-text-2)] hover:border-[var(--kink-purple)]/40"
+                        }`}
+                      >
+                        {active ? <Vibrate size={12} className="pulse-dot" /> : <Play size={12} />} {p.label.toUpperCase()}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
           </div>
           {toys.linked && (
             <p className="font-mono-data text-[11px] text-[var(--kink-muted)] mt-2">
@@ -198,6 +225,19 @@ export function ToysPanel({ toys, locked = false, onToggleLock }) {
           {toys.devices.map((d) => (
             <div key={d.index} className="flex items-center justify-between gap-4" data-testid={`toy-row-${d.index}`}>
               <span className="font-mono-data text-sm text-[var(--kink-text-2)] truncate">{d.name}</span>
+              {toys.isVirtual && (
+                <div className="flex items-center gap-2 flex-1 min-w-0" data-testid={`toy-virtual-level-${d.index}`}>
+                  <div className="h-2 flex-1 min-w-0 bg-[var(--kink-base)] border border-[var(--kink-overlay)] overflow-hidden">
+                    <div
+                      className="h-full bg-[var(--kink-purple)] transition-[width] duration-100"
+                      style={{ width: `${Math.round((toys.virtualLevels[d.index] || 0) * 100)}%` }}
+                    />
+                  </div>
+                  <span className="font-mono-data text-[10px] tabular-nums text-[var(--kink-muted)] w-9 text-right shrink-0">
+                    {Math.round((toys.virtualLevels[d.index] || 0) * 100)}%
+                  </span>
+                </div>
+              )}
               {toys.linked ? (
                 <span className="font-mono-data text-xs text-[var(--kink-purple)]">mirrors SPEED</span>
               ) : toys.activePattern ? (
