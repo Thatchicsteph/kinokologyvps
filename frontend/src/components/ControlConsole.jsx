@@ -283,9 +283,15 @@ export function ControlConsole({ onCommand, disabled = false, autoStart = false,
       let depth = stateRef.current.depth;
       let sendDepth = false;
       if (patProg) {
-        // intensity 0..1 at elapsed ms -> speed 0..maxSpeed (clampSpeed applies the cap).
+        // Speed follows the pattern's real waveform. Depth moves on its OWN
+        // slower, independent rhythm across the owner's band, so a stroke no
+        // longer shortens every time speed dips — the two feel decoupled.
+        // ~14s depth cycle (a slow sine) vs the pattern's own fast shape.
         const intensity = Math.min(1, Math.max(0, patProg.intensityAt(t * 1000)));
         speed = intensity * maxSpeed;
+        const depth01 = 0.5 - 0.5 * Math.cos((t % 14) / 14 * 2 * Math.PI);
+        depth = minDepth + depth01 * (maxDepth - minDepth);
+        sendDepth = true;
       } else {
       switch (pid) {
         case "wave":
