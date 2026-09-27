@@ -3,6 +3,7 @@ import * as SliderPrimitive from "@radix-ui/react-slider";
 import { Gauge, Ruler, Waves, Move3d, Power, Square, Zap, Lock, Bookmark, Trash2 } from "lucide-react";
 import { PATTERNS, cmd } from "@/lib/ossm";
 import { loadPresets, savePreset, deletePreset } from "@/lib/guestPresets";
+import { VIBRATION_PATTERNS, getPattern, categoryOf, PATTERN_CATEGORIES } from "@/lib/vibrationPatterns";
 
 const ICONS = { speed: Gauge, depth: Move3d, stroke: Ruler, sensation: Waves };
 
@@ -14,6 +15,7 @@ const CONTROL_DESCRIPTIONS = {
 };
 
 // App-level automated motion programs. Each returns targets given elapsed seconds.
+// The original six are hand-tuned speed/depth motions.
 export const PROGRAMS = [
   { id: "wave",    name: "Wave",        desc: "Smooth speed swell" },
   { id: "buildup", name: "Build-Up",    desc: "Slow ramp, repeat" },
@@ -22,6 +24,35 @@ export const PROGRAMS = [
   { id: "surge",   name: "Surge",       desc: "Fast in, slow out" },
   { id: "random",  name: "Random",      desc: "Shifts every few sec" },
 ];
+
+// Programs derived from the shared vibration waveforms (lib/vibrationPatterns).
+// Each maps the pattern's intensity(t) 0..1 straight onto OSSM SPEED, so the
+// stroker follows the SAME shape the toys do — one source of truth for the
+// waveform. Id is prefixed "pat_" so runProgram knows to drive it from the
+// waveform math; the underscore (not a colon) keeps the meta:program: slug
+// within the backend's [a-z0-9_-] validation with no server change.
+export const PATTERN_PROGRAMS = VIBRATION_PATTERNS.map((p) => ({
+  id: `pat_${p.id}`,
+  name: p.label,
+  desc: p.description,
+  patternId: p.id,
+  category: categoryOf(p.id),
+}));
+
+// Auto-program groups for the UI: the six classic motions first, then the
+// pattern-derived programs under their pattern category headings.
+export const PROGRAM_GROUPS = [
+  { key: "motion", label: "Classic Motion", programs: PROGRAMS },
+  ...PATTERN_CATEGORIES.map((c) => ({
+    key: c.key,
+    label: c.label,
+    programs: PATTERN_PROGRAMS.filter((p) => p.category === c.key),
+  })).filter((g) => g.programs.length > 0),
+];
+
+// Flat union for name lookups (e.g. the active-program note), covering both the
+// classic motions and every pattern-derived program.
+export const ALL_PROGRAMS = [...PROGRAMS, ...PATTERN_PROGRAMS];
 
 function ControlSlider({ id, label, value, onChange, disabled, danger, min = 0, max = 100, limitNote }) {
   const Icon = ICONS[id];
@@ -244,11 +275,18 @@ export function ControlConsole({ onCommand, disabled = false, autoStart = false,
     setActiveProgram(pid);
     const start = Date.now();
     const rnd = { last: 0, speed: 40, depth: Math.min(maxDepth, Math.max(60, minDepth)) };
+    // Pattern-derived program? Drive SPEED from the shared vibration waveform.
+    const patProg = pid.startsWith("pat_") ? getPattern(pid.slice(4)) : null;
     progRef.current = setInterval(() => {
       const t = (Date.now() - start) / 1000;
       let speed = stateRef.current.speed;
       let depth = stateRef.current.depth;
       let sendDepth = false;
+      if (patProg) {
+        // intensity 0..1 at elapsed ms -> speed 0..maxSpeed (clampSpeed applies the cap).
+        const intensity = Math.min(1, Math.max(0, patProg.intensityAt(t * 1000)));
+        speed = intensity * maxSpeed;
+      } else {
       switch (pid) {
         case "wave":
           speed = 50 + 35 * Math.sin(t * 0.5); break;
@@ -275,6 +313,7 @@ export function ControlConsole({ onCommand, disabled = false, autoStart = false,
           speed = rnd.speed; depth = rnd.depth; sendDepth = true; break;
         }
         default: break;
+      }
       }
       speed = clampSpeed(speed);
       depth = clampDepth(depth);
@@ -391,26 +430,35 @@ export function ControlConsole({ onCommand, disabled = false, autoStart = false,
         <span className="font-display text-xs tracking-[0.15em] text-[var(--kink-text-2)] flex items-center gap-2 mb-3">
           <Zap size={14} className="text-[var(--kink-purple)]" /> AUTO PROGRAMS
         </span>
-        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-          {PROGRAMS.map((p) => (
-            <button
-              key={p.id}
-              onClick={() => runProgram(p.id)}
-              data-testid={`program-${p.id}`}
-              className={`text-left px-3 py-2.5 border transition-colors duration-200 ${
-                activeProgram === p.id
-                  ? "border-[var(--kink-purple)] bg-[var(--kink-purple)]/[0.12] text-white glow-purple"
-                  : "border-[var(--kink-overlay)] text-[var(--kink-text-2)] hover:border-[var(--kink-purple)]/40"
-              }`}
-            >
-              <span className="block text-sm font-medium">{p.name}</span>
-              <span className="block font-mono-data text-[10px] text-[var(--kink-muted)] mt-0.5">{p.desc}</span>
-            </button>
+        <div className="space-y-3">
+          {PROGRAM_GROUPS.map((group) => (
+            <div key={group.key}>
+              <span className="font-mono-data text-[10px] uppercase tracking-wide text-[var(--kink-muted)] block mb-1.5">
+                {group.label}
+              </span>
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                {group.programs.map((p) => (
+                  <button
+                    key={p.id}
+                    onClick={() => runProgram(p.id)}
+                    data-testid={`program-${p.id}`}
+                    className={`text-left px-3 py-2.5 border transition-colors duration-200 ${
+                      activeProgram === p.id
+                        ? "border-[var(--kink-purple)] bg-[var(--kink-purple)]/[0.12] text-white glow-purple"
+                        : "border-[var(--kink-overlay)] text-[var(--kink-text-2)] hover:border-[var(--kink-purple)]/40"
+                    }`}
+                  >
+                    <span className="block text-sm font-medium">{p.name}</span>
+                    <span className="block font-mono-data text-[10px] text-[var(--kink-muted)] mt-0.5">{p.desc}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
           ))}
         </div>
         {activeProgram && (
           <p className="font-mono-data text-xs text-[var(--kink-purple)] mt-3" data-testid="program-active-note">
-            ▶ Running "{PROGRAMS.find((p) => p.id === activeProgram)?.name}" — move any slider or press STOP to take manual control.
+            ▶ Running "{ALL_PROGRAMS.find((p) => p.id === activeProgram)?.name}" — move any slider or press STOP to take manual control.
           </p>
         )}
       </div>

@@ -5,7 +5,7 @@ import { Sparkline } from "@/components/Sparkline";
 import { Gauge, Ruler, Waves, Move3d, Activity, Heart, Zap } from "lucide-react";
 import kinkologyMark from "@/assets/kinkology-mark.png";
 import { PATTERNS } from "@/lib/ossm";
-import { PROGRAMS } from "@/components/ControlConsole";
+import { ALL_PROGRAMS } from "@/components/ControlConsole";
 
 // Smoothly tween a displayed number toward its live target so the overlay
 // gauges glide instead of snapping when a new telemetry frame lands. Uses
@@ -237,7 +237,7 @@ export default function Overlay() {
 
       {/* Active program / pattern */}
       {show("program") && (frame.active_program || frame.pattern > 0) && (() => {
-        const prog = frame.active_program ? PROGRAMS.find((p) => p.id === frame.active_program) : null;
+        const prog = frame.active_program ? ALL_PROGRAMS.find((p) => p.id === frame.active_program) : null;
         const pat = !prog ? PATTERNS.find((p) => p.idx === frame.pattern) : null;
         if (!prog && !pat) return null;
         return (

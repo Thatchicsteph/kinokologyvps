@@ -27,7 +27,7 @@ import { applyTheme } from "@/components/ThemeSync";
 import { fmtTime } from "@/lib/api";
 import { webBluetoothSupported } from "@/lib/ossm";
 import { PATTERNS } from "@/lib/ossm";
-import { PROGRAMS } from "@/components/ControlConsole";
+import { ALL_PROGRAMS } from "@/components/ControlConsole";
 import { LogOut, Bluetooth, BluetoothConnected, Power, SkipForward, Plus, Copy, Trash2, Ban, Clock, Activity, Ticket, Sliders, Heart, Eye, Settings2, GripVertical, EyeOff, X, ChevronUp, ChevronDown, MessageSquare, Zap, Columns2 } from "lucide-react";
 import kinkologyMark from "@/assets/kinkology-mark.png";
 import { toast } from "sonner";
@@ -745,7 +745,7 @@ export default function AdminDashboard() {
         {state.active && (state.telemetry?.active_program || state.telemetry?.pattern > 0) && (
           <div className="flex flex-wrap gap-2 mb-5" data-testid="session-program-badges">
             {state.telemetry?.active_program && (() => {
-              const prog = PROGRAMS.find((p) => p.id === state.telemetry.active_program);
+              const prog = ALL_PROGRAMS.find((p) => p.id === state.telemetry.active_program);
               return prog ? (
                 <span className="flex items-center gap-1.5 font-mono-data text-xs px-3 py-1.5 border border-[var(--kink-purple)]/50 text-[var(--kink-purple)]" data-testid="session-active-program">
                   <Zap size={11} /> AUTO: {prog.name}
