@@ -494,7 +494,7 @@ export function ControlConsole({ onCommand, disabled = false, autoStart = false,
               <span className="font-mono-data text-[10px] uppercase tracking-wide text-[var(--kink-muted)] block mb-2">
                 {group.label}
               </span>
-              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
                 {group.programs.map((p) => {
                   const active = activeProgram === p.id;
                   return (
@@ -504,15 +504,23 @@ export function ControlConsole({ onCommand, disabled = false, autoStart = false,
                       onMouseEnter={() => p.patternId && setHoveredProgram(p.patternId)}
                       onMouseLeave={() => setHoveredProgram((h) => (h === p.patternId ? null : h))}
                       data-testid={`program-${p.id}`}
-                      title={p.desc}
-                      className={`flex items-center justify-between gap-2 px-3 py-2 border text-left transition-colors duration-200 ${
+                      className={`flex flex-col gap-1.5 w-full px-3 py-2.5 border text-left transition-colors duration-200 ${
                         active
                           ? "border-[var(--kink-purple)] bg-[var(--kink-purple)]/[0.12] text-white glow-purple"
                           : "border-[var(--kink-overlay)] text-[var(--kink-text-2)] hover:border-[var(--kink-purple)]/40"
                       }`}
                     >
-                      <span className="text-xs font-medium truncate">{p.name}</span>
-                      {p.patternId && <PatternSparkline patternId={p.patternId} />}
+                      <span className="text-xs font-semibold leading-tight">{p.name}</span>
+                      {p.patternId && (
+                        <span className="block w-full h-5 opacity-80">
+                          <PatternSparkline patternId={p.patternId} height={20} fill />
+                        </span>
+                      )}
+                      {p.desc && (
+                        <span className="font-mono-data text-[10px] leading-snug text-[var(--kink-muted)]">
+                          {p.desc}
+                        </span>
+                      )}
                     </button>
                   );
                 })}

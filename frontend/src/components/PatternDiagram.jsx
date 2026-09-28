@@ -36,11 +36,21 @@ function buildSparkPoints(pat, seconds, w, h, pad = 1) {
   return pts.join(" ");
 }
 
-export function PatternSparkline({ patternId, seconds = 12, width = 64, height = 20 }) {
+// Speed-only sparkline. `fill` makes it span the container width (used inside the
+// program cards); otherwise it renders at a fixed pixel size. The viewBox stays
+// in internal units, so the polyline math is unchanged either way.
+export function PatternSparkline({ patternId, seconds = 12, width = 64, height = 20, fill = false }) {
   const pat = getPattern(patternId);
   if (!pat) return null;
   return (
-    <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`} className="shrink-0" aria-hidden="true">
+    <svg
+      width={fill ? "100%" : width}
+      height={height}
+      viewBox={`0 0 ${width} ${height}`}
+      preserveAspectRatio="none"
+      className={fill ? "block w-full" : "shrink-0"}
+      aria-hidden="true"
+    >
       <polyline
         points={buildSparkPoints(pat, seconds, width, height)}
         fill="none" stroke="var(--kink-purple)" strokeWidth="1.5"
