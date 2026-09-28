@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Reorder } from "framer-motion";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, Link, useLocation } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
 import { api } from "@/lib/api";
 import { useBleHost } from "@/hooks/useBleHost";
@@ -480,6 +480,11 @@ function PanelCustomizer({ open, onClose, layout, setColumnCount, setZoneOrder, 
 export default function AdminDashboard() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
+  // Which admin page is showing, derived from the URL so /admin/setup is a real
+  // bookmarkable page — but both routes render the SAME element instance, so
+  // React Router does not remount on switch and the BLE/WS connection survives.
+  const section = location.pathname.startsWith("/admin/setup") ? "setup" : "live";
   const bleRef = useRef(null);
   const toys = useToys({
     onStatusChange: ({ available, pattern }) => {
@@ -1241,6 +1246,30 @@ export default function AdminDashboard() {
           <span className="font-mono-data text-xs text-[var(--kink-muted)] ml-2 hidden sm:inline">CONTROL DECK</span>
         </div>
         <div className="flex items-center gap-4">
+          <nav className="flex items-center gap-1 mr-1" data-testid="admin-section-nav">
+            <Link
+              to="/admin"
+              data-testid="nav-live"
+              className={`font-display font-black uppercase tracking-[0.12em] text-xs px-3 py-1.5 border transition-colors ${
+                section === "live"
+                  ? "border-[var(--kink-purple)] bg-[var(--kink-purple)]/15 text-[var(--kink-text)]"
+                  : "border-[var(--kink-overlay)] text-[var(--kink-text-2)] hover:border-[var(--kink-purple)]/50 hover:text-[var(--kink-purple)]"
+              }`}
+            >
+              Live
+            </Link>
+            <Link
+              to="/admin/setup"
+              data-testid="nav-setup"
+              className={`font-display font-black uppercase tracking-[0.12em] text-xs px-3 py-1.5 border transition-colors ${
+                section === "setup"
+                  ? "border-[var(--kink-purple)] bg-[var(--kink-purple)]/15 text-[var(--kink-text)]"
+                  : "border-[var(--kink-overlay)] text-[var(--kink-text-2)] hover:border-[var(--kink-purple)]/50 hover:text-[var(--kink-purple)]"
+              }`}
+            >
+              Setup
+            </Link>
+          </nav>
           <span className="font-mono-data text-xs text-[var(--kink-text-2)] hidden sm:inline">{user?.email}</span>
           <button onClick={() => setCustomizerOpen(true)} data-testid="open-panel-customizer" className="flex items-center gap-1.5 font-mono-data text-xs text-[var(--kink-text-2)] hover:text-[var(--kink-purple)] transition-colors">
             <Settings2 size={14} /> CUSTOMIZE
@@ -1251,7 +1280,7 @@ export default function AdminDashboard() {
         </div>
       </header>
 
-      {layout.order.zones[TOP_ZONE].filter((id) => !layout.hidden.includes(id)).map((id) => (
+      {layout.order.zones[TOP_ZONE].filter((id) => !layout.hidden.includes(id) && sectionOf(id) === section).map((id) => (
         <div className="mb-6" key={`top-${id}`}>
           <CollapsiblePanel id={id} title={PANEL_DEFS[id]?.label || id} collapsed={!!panelCollapsed[id]} onToggle={togglePanelCollapse}>
             {panelNodes[id]}
@@ -1261,16 +1290,13 @@ export default function AdminDashboard() {
 
       <div className={`grid gap-6 items-start ${GRID_COLS_CLASS[layout.columnCount] || GRID_COLS_CLASS[DEFAULT_GRID_COLUMNS]}`}>
         {(() => {
+          // Each admin page shows ONE section (live or setup). Panels are still
+          // freely movable/hideable via the customizer; this only filters which
+          // ones appear on the current page.
           const visible = layout.order.zones.slice(1)
             .flat()
-            .filter((id) => !layout.hidden.includes(id));
-          // Stable sort: live panels first, setup panels after, each keeping the
-          // user's existing order. This groups the two sections without touching
-          // the zone/customizer machinery.
-          const live = visible.filter((id) => sectionOf(id) === "live");
-          const setup = visible.filter((id) => sectionOf(id) === "setup");
-          const out = [];
-          const renderPanel = (id) => {
+            .filter((id) => !layout.hidden.includes(id) && sectionOf(id) === section);
+          return visible.map((id) => {
             const span = Math.min(panelWidths[id] || 1, layout.columnCount, 5);
             return (
               <div key={id} className={COL_SPAN_CLASS[span] || ""}>
@@ -1284,25 +1310,15 @@ export default function AdminDashboard() {
                 </CollapsiblePanel>
               </div>
             );
-          };
-          const SectionHeading = ({ label, hint }) => (
-            <div key={`section-${label}`} className="col-span-full flex items-center gap-3 mt-2 first:mt-0">
-              <span className="font-display font-black uppercase tracking-[0.18em] text-xs text-[var(--kink-text-2)]">{label}</span>
-              <span className="font-mono-data text-[10px] text-[var(--kink-muted)] hidden sm:inline">{hint}</span>
-              <span className="flex-1 h-px bg-[var(--kink-overlay)]" />
-            </div>
-          );
-          if (live.length) {
-            out.push(<SectionHeading key="h-live" label="Live" hint="what you touch during a session" />);
-            live.forEach((id) => out.push(renderPanel(id)));
-          }
-          if (setup.length) {
-            out.push(<SectionHeading key="h-setup" label="Setup" hint="configure once" />);
-            setup.forEach((id) => out.push(renderPanel(id)));
-          }
-          return out;
+          });
         })()}
       </div>
+
+      {layout.order.zones.flat().filter((id) => !layout.hidden.includes(id) && sectionOf(id) === section).length === 0 && (
+        <p className="font-mono-data text-sm text-[var(--kink-muted)] text-center py-12" data-testid="section-empty">
+          No {section === "setup" ? "Setup" : "Live"} panels are visible. Use CUSTOMIZE to unhide panels.
+        </p>
+      )}
 
       <PanelCustomizer
         open={customizerOpen}

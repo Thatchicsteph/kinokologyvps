@@ -1,7 +1,7 @@
 import { useEffect } from "react";
 import { api } from "@/lib/api";
 
-const VALID = new Set(["kink", "neon", "dungeon", "moody"]);
+const VALID = new Set(["kink", "neon", "dungeon", "moody", "aurora"]);
 
 /**
  * Read the current room theme from the backend once on mount and paint it

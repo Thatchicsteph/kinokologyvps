@@ -35,6 +35,7 @@ function App() {
           <Route path="/" element={<Landing />} />
           <Route path="/admin/login" element={<AdminLogin />} />
           <Route path="/admin" element={<ProtectedRoute><AdminDashboard /></ProtectedRoute>} />
+          <Route path="/admin/setup" element={<ProtectedRoute><AdminDashboard /></ProtectedRoute>} />
           <Route path="/admin/logs" element={<ProtectedRoute><Logs /></ProtectedRoute>} />
           <Route path="/c/:code" element={<GuestControl />} />
           <Route path="/overlay" element={<Overlay />} />
