@@ -57,7 +57,7 @@ function StatusPill({ ok, okText, offText }) {
 // Device Activity, and Toy Control, which default to zone 0 (full
 // width) but aren't locked there.
 // ------------------------------------------------------------------
-const PANEL_LAYOUT_STORAGE_KEY = "kinkology_admin_panel_layout_v5";
+const PANEL_LAYOUT_STORAGE_KEY = "kinkology_admin_panel_layout_v6";
 const PANEL_COLLAPSE_STORAGE_KEY = "kinkology_admin_panel_collapsed_v1";
 const PANEL_WIDTH_STORAGE_KEY = "kinkology_admin_panel_width_v2";
 // Panels that default to a wider span. The OSSM console (toy-control) defaults
@@ -135,14 +135,21 @@ const PANEL_SECTION = {
 };
 const sectionOf = (id) => PANEL_SECTION[id] || "live";
 
-// zones[0] = full-width row; zones[1] / zones[2] = the two default grid
-// columns. Total zone count is always 1 (top) + columnCount (grid).
+// zones[0] = full-width top row; zones[1..3] = the three default grid columns.
+// Ordered so BOTH filtered pages read well:
+//  - Live top: the video stream then the full-width OSSM console.
+//  - Setup top: the wide session-history table.
+//  - Grid columns group each section's remaining panels into balanced columns.
 const DEFAULT_PANEL_ORDER = {
   zones: [
-    ["obs-stream", "device-activity", "toy-control"],
-    ["live-session", "recent-activity", "heart-rate-sync"],
-    ["theme-picker", "owner-name", "live-overlay", "base-urls"],
-    ["safety-limits", "two-factor", "new-access-code", "issued-codes"],
+    // full-width top row (live: stream, console; setup: history)
+    ["obs-stream", "toy-control", "session-history"],
+    // column 1  (live: live-session, device;  setup: theme, owner, 2FA)
+    ["live-session", "device-activity", "theme-picker", "owner-name", "two-factor"],
+    // column 2  (live: activity, health;  setup: safety-limits, base-urls, recordings)
+    ["recent-activity", "system-health", "safety-limits", "base-urls", "session-recordings"],
+    // column 3  (live: access codes;  setup: HR sync, overlay)
+    ["new-access-code", "issued-codes", "heart-rate-sync", "live-overlay"],
   ],
 };
 
@@ -311,13 +318,18 @@ function CollapsiblePanel({ id, title, collapsed, onToggle, children }) {
   );
 }
 
-function ColumnEditor({ title, ids, hidden, onReorder, onToggle, zoneIndex, zoneCount, onMove, widths, onToggleWidth }) {
+function ColumnEditor({ title, ids, hidden, onReorder, onToggle, zoneIndex, zoneCount, onMove, widths, onToggleWidth, section }) {
   const movable = typeof onMove === "function" && zoneCount > 1;
+  // When a section is given, show only that section's panels; reorder callbacks
+  // receive just this filtered subset (the caller reconciles it back into the
+  // full zone). Without a section, behave exactly as before (all panels).
+  const shownIds = section ? ids.filter((id) => sectionOf(id) === section) : ids;
+  if (section && shownIds.length === 0) return null;
   return (
     <div className="mb-5">
       <h3 className="font-display text-[10px] tracking-[0.2em] text-[var(--kink-muted)] mb-2">{title}</h3>
-      <Reorder.Group axis="y" values={ids} onReorder={onReorder} className="space-y-1.5">
-        {ids.map((id) => {
+      <Reorder.Group axis="y" values={shownIds} onReorder={onReorder} className="space-y-1.5">
+        {shownIds.map((id) => {
           const def = PANEL_DEFS[id];
           if (!def) return null;
           const isHidden = hidden.includes(id);
@@ -330,6 +342,17 @@ function ColumnEditor({ title, ids, hidden, onReorder, onToggle, zoneIndex, zone
             >
               <GripVertical size={14} className="text-[var(--kink-muted)] shrink-0" />
               <span className="flex-1 font-mono-data text-sm truncate">{def.label}</span>
+              <span
+                data-testid={`panel-section-${id}`}
+                title={sectionOf(id) === "setup" ? "Shows on the Setup page" : "Shows on the Live page"}
+                className={`shrink-0 font-mono-data text-[9px] uppercase tracking-wide px-1.5 py-0.5 border ${
+                  sectionOf(id) === "setup"
+                    ? "border-[var(--kink-overlay)] text-[var(--kink-muted)]"
+                    : "border-[var(--kink-purple)]/40 text-[var(--kink-purple)]"
+                }`}
+              >
+                {sectionOf(id) === "setup" ? "Setup" : "Live"}
+              </span>
               {movable && (
                 <>
                   <button
@@ -389,6 +412,63 @@ function PanelCustomizer({ open, onClose, layout, setColumnCount, setZoneOrder, 
   if (!open) return null;
   const columnNums = Array.from({ length: MAX_GRID_COLUMNS - MIN_GRID_COLUMNS + 1 }, (_, i) => i + MIN_GRID_COLUMNS);
   const zoneCount = layout.order.zones.length; // 1 (top) + columnCount
+
+  // Reorder within one SECTION of a zone: the ColumnEditor hands back only that
+  // section's ids in their new order; we merge them back into the full zone,
+  // keeping the OTHER section's ids where they already sit. This lets each
+  // section be reordered independently without dropping the other's panels.
+  const reorderSection = (zoneIndex, section, newSectionIds) => {
+    const zone = layout.order.zones[zoneIndex] || [];
+    let k = 0;
+    const merged = zone.map((id) =>
+      sectionOf(id) === section ? newSectionIds[k++] : id
+    );
+    setZoneOrder(zoneIndex, merged);
+  };
+
+  // Render one section's editors (TOP + each grid column, filtered to section).
+  const SectionGroup = ({ section, label, hint }) => (
+    <div className="mb-6" data-testid={`customizer-section-${section}`}>
+      <div className="flex items-center gap-3 mb-3">
+        <span className="font-display font-black uppercase tracking-[0.18em] text-sm text-[var(--kink-text)]">{label}</span>
+        <span className="font-mono-data text-[10px] text-[var(--kink-muted)]">{hint}</span>
+        <span className="flex-1 h-px bg-[var(--kink-overlay)]" />
+      </div>
+      <ColumnEditor
+        title="TOP (FULL-WIDTH)"
+        section={section}
+        ids={layout.order.zones[TOP_ZONE]}
+        hidden={layout.hidden}
+        onReorder={(ids) => reorderSection(TOP_ZONE, section, ids)}
+        onToggle={toggleHidden}
+        zoneIndex={TOP_ZONE}
+        zoneCount={zoneCount}
+        onMove={moveToZone}
+      />
+      <div className={`grid gap-x-6 sm:grid-cols-2 ${layout.columnCount >= 3 ? "lg:grid-cols-3" : ""}`}>
+        {layout.order.zones.slice(1).map((ids, gridIdx) => {
+          const zoneIndex = gridIdx + 1;
+          return (
+            <ColumnEditor
+              key={`grid-col-${section}-${gridIdx}`}
+              title={`COLUMN ${gridIdx + 1}`}
+              section={section}
+              ids={ids}
+              hidden={layout.hidden}
+              onReorder={(newIds) => reorderSection(zoneIndex, section, newIds)}
+              onToggle={toggleHidden}
+              zoneIndex={zoneIndex}
+              zoneCount={zoneCount}
+              onMove={moveToZone}
+              widths={widths}
+              onToggleWidth={layout.columnCount >= 2 ? onToggleWidth : undefined}
+            />
+          );
+        })}
+      </div>
+    </div>
+  );
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-start sm:items-center justify-center bg-black/70 p-4 overflow-y-auto"
@@ -409,7 +489,7 @@ function PanelCustomizer({ open, onClose, layout, setColumnCount, setZoneOrder, 
           </button>
         </div>
         <p className="text-[var(--kink-text-2)] text-sm mb-4">
-          Drag to reorder within a column, use ← / → to move any panel — including the stream, device, and toy panels — into another column, toggle the eye to hide one. Only visible to you — this browser remembers your layout.
+          Drag to reorder within a column, use ← / → to move any panel — including the stream, device, and toy panels — into another column, toggle the eye to hide one. The LIVE / SETUP badge shows which page each panel appears on. Only visible to you — this browser remembers your layout.
         </p>
 
         <div className="mb-5">
@@ -433,37 +513,8 @@ function PanelCustomizer({ open, onClose, layout, setColumnCount, setZoneOrder, 
           </div>
         </div>
 
-        <ColumnEditor
-          title="TOP (FULL-WIDTH)"
-          ids={layout.order.zones[TOP_ZONE]}
-          hidden={layout.hidden}
-          onReorder={(ids) => setZoneOrder(TOP_ZONE, ids)}
-          onToggle={toggleHidden}
-          zoneIndex={TOP_ZONE}
-          zoneCount={zoneCount}
-          onMove={moveToZone}
-        />
-
-        <div className={`grid gap-x-6 sm:grid-cols-2 ${layout.columnCount >= 3 ? "lg:grid-cols-3" : ""}`}>
-          {layout.order.zones.slice(1).map((ids, gridIdx) => {
-            const zoneIndex = gridIdx + 1;
-            return (
-              <ColumnEditor
-                key={`grid-col-${gridIdx}`}
-                title={`COLUMN ${gridIdx + 1}`}
-                ids={ids}
-                hidden={layout.hidden}
-                onReorder={(newIds) => setZoneOrder(zoneIndex, newIds)}
-                onToggle={toggleHidden}
-                zoneIndex={zoneIndex}
-                zoneCount={zoneCount}
-                onMove={moveToZone}
-                widths={widths}
-                onToggleWidth={layout.columnCount >= 2 ? onToggleWidth : undefined}
-              />
-            );
-          })}
-        </div>
+        <SectionGroup section="live" label="Live" hint="the /admin page" />
+        <SectionGroup section="setup" label="Setup" hint="the /admin/setup page" />
 
         <button
           onClick={resetLayout}
