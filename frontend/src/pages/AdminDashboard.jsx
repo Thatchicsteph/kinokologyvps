@@ -57,7 +57,7 @@ function StatusPill({ ok, okText, offText }) {
 // Device Activity, and Toy Control, which default to zone 0 (full
 // width) but aren't locked there.
 // ------------------------------------------------------------------
-const PANEL_LAYOUT_STORAGE_KEY = "kinkology_admin_panel_layout_v7";
+const PANEL_LAYOUT_STORAGE_KEY = "kinkology_admin_panel_layout_v8";
 const PANEL_COLLAPSE_STORAGE_KEY = "kinkology_admin_panel_collapsed_v1";
 const PANEL_WIDTH_STORAGE_KEY = "kinkology_admin_panel_width_v2";
 // Panels that default to a wider span. The OSSM console (toy-control) defaults
@@ -146,14 +146,15 @@ const DEFAULT_PANEL_ORDER = {
     // full-width top row — panels that genuinely want the whole width
     ["obs-stream", "toy-control", "session-history"],
     // column 1 — Live: live-session (medium) + device-activity (short);
-    //            Setup: safety-limits + two-factor (both medium)
-    ["live-session", "device-activity", "safety-limits", "two-factor"],
+    //            Setup: safety-limits (TALL) anchors the column, + base-urls (short)
+    ["live-session", "device-activity", "safety-limits", "base-urls"],
     // column 2 — Live: recent-activity (medium) + system-health (short);
-    //            Setup: heart-rate-sync (medium) + base-urls + overlay (short)
-    ["recent-activity", "system-health", "heart-rate-sync", "base-urls", "live-overlay"],
+    //            Setup: live-overlay (TALL) anchors the column, + theme (short)
+    ["recent-activity", "system-health", "live-overlay", "theme-picker"],
     // column 3 — Live: issued-codes (medium) + new-access-code (short);
-    //            Setup: session-recordings (medium) + theme + owner (short)
-    ["issued-codes", "new-access-code", "session-recordings", "theme-picker", "owner-name"],
+    //            Setup: the remaining mediums/shorts pack to match the tall
+    //            columns: heart-rate + two-factor + recordings + owner-name
+    ["issued-codes", "new-access-code", "heart-rate-sync", "two-factor", "session-recordings", "owner-name"],
   ],
 };
 
