@@ -408,7 +408,7 @@ function ColumnEditor({ title, ids, hidden, onReorder, onToggle, zoneIndex, zone
   );
 }
 
-function PanelCustomizer({ open, onClose, layout, setColumnCount, setZoneOrder, moveToZone, toggleHidden, resetLayout, widths, onToggleWidth }) {
+function PanelCustomizer({ open, onClose, layout, setColumnCount, setZoneOrder, moveToZone, toggleHidden, resetLayout, widths, onToggleWidth, section = "live" }) {
   if (!open) return null;
   const columnNums = Array.from({ length: MAX_GRID_COLUMNS - MIN_GRID_COLUMNS + 1 }, (_, i) => i + MIN_GRID_COLUMNS);
   const zoneCount = layout.order.zones.length; // 1 (top) + columnCount
@@ -476,7 +476,7 @@ function PanelCustomizer({ open, onClose, layout, setColumnCount, setZoneOrder, 
       data-testid="panel-customizer-backdrop"
     >
       <div
-        className="hud-panel w-full max-w-3xl p-5 sm:p-6 my-8"
+        className="hud-panel w-full max-w-3xl p-5 sm:p-6 my-8 max-h-[90vh] overflow-y-auto"
         onClick={(e) => e.stopPropagation()}
         data-testid="panel-customizer"
       >
@@ -489,7 +489,7 @@ function PanelCustomizer({ open, onClose, layout, setColumnCount, setZoneOrder, 
           </button>
         </div>
         <p className="text-[var(--kink-text-2)] text-sm mb-4">
-          Drag to reorder within a column, use ← / → to move any panel — including the stream, device, and toy panels — into another column, toggle the eye to hide one. The LIVE / SETUP badge shows which page each panel appears on. Only visible to you — this browser remembers your layout.
+          Drag to reorder within a column, use ← / → to move a panel into another column, toggle the eye to hide one. Showing the panels on this page ({section === "setup" ? "Setup" : "Live"}) — switch pages to arrange the other. Only visible to you — this browser remembers your layout.
         </p>
 
         <div className="mb-5">
@@ -513,8 +513,11 @@ function PanelCustomizer({ open, onClose, layout, setColumnCount, setZoneOrder, 
           </div>
         </div>
 
-        <SectionGroup section="live" label="Live" hint="the /admin page" />
-        <SectionGroup section="setup" label="Setup" hint="the /admin/setup page" />
+        <SectionGroup
+          section={section}
+          label={section === "setup" ? "Setup" : "Live"}
+          hint={section === "setup" ? "the /admin/setup page" : "the /admin page"}
+        />
 
         <button
           onClick={resetLayout}
@@ -1382,6 +1385,7 @@ export default function AdminDashboard() {
         resetLayout={resetLayout}
         widths={panelWidths}
         onToggleWidth={cyclePanelWidth}
+        section={section}
       />
     </div>
   );
