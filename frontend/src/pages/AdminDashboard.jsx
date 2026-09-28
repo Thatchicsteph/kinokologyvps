@@ -121,8 +121,10 @@ const PANEL_SECTION = {
   "live-session": "live",
   "recent-activity": "live",
   "system-health": "live",
-  "heart-rate-sync": "live",
-  "live-overlay": "live",
+  "new-access-code": "live",
+  "issued-codes": "live",
+  "heart-rate-sync": "setup",
+  "live-overlay": "setup",
   "session-recordings": "setup",
   "session-history": "setup",
   "theme-picker": "setup",
@@ -130,8 +132,6 @@ const PANEL_SECTION = {
   "two-factor": "setup",
   "base-urls": "setup",
   "safety-limits": "setup",
-  "new-access-code": "setup",
-  "issued-codes": "setup",
 };
 const sectionOf = (id) => PANEL_SECTION[id] || "live";
 
