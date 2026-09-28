@@ -38,9 +38,9 @@ const GUEST_DEFAULT_ORDER = {
     [],                  // column 5
   ],
 };
-const GUEST_DEFAULT_WIDTHS = { stream: 3, controls: 2 };
+const GUEST_DEFAULT_WIDTHS = { stream: 3, controls: 5 };
 const guestLayout = createPanelLayout({
-  storagePrefix: "kinkology_guest_v4",
+  storagePrefix: "kinkology_guest_v5",
   panelDefs: GUEST_PANEL_DEFS,
   defaultOrder: GUEST_DEFAULT_ORDER,
   defaultColumns: 5,

@@ -1,6 +1,10 @@
 import React, { useEffect, useRef, useState } from "react";
 import { getPattern } from "@/lib/vibrationPatterns";
 
+// Fixed render height (viewBox units); width is measured at runtime so the rail
+// fills the container's full width with no aspect distortion.
+const H = 96;
+
 // Animated VIRTUAL DEVICE view of an OSSM pattern program: a vertical rail with
 // a toolhead (carriage) that physically slides back and forth, so you can SEE
 // the motion instead of reading a chart. It is driven by the same four-axis
@@ -67,9 +71,26 @@ export function PatternSparkline({ patternId, seconds = 12, width = 64, height =
 export function PatternDiagram({ patternId, name, running = true, mode = "running" }) {
   const pat = getPattern(patternId);
   const wrapRef = useRef(null);
+  const [vw, setVw] = useState(320);
   const [{ pos, top, bottom, speed, sensation }, setFrame] = useState({
     pos: 0, top: 1, bottom: 0, speed: 0, sensation: 0,
   });
+
+  // Measure the container so the viewBox width tracks the real pixel width at a
+  // fixed height — the rail spans the FULL width with no aspect distortion
+  // (the toolhead stays perfectly round). Re-measures on resize.
+  useEffect(() => {
+    const el = wrapRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return undefined;
+    const measure = () => {
+      const w = el.clientWidth - 24; // minus the p-3 padding (12px each side)
+      if (w > 0) setVw(Math.round((w / 120) * H)); // scale to the 120px render height
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
 
   useEffect(() => {
     if (!pat || !running) {
@@ -108,7 +129,9 @@ export function PatternDiagram({ patternId, name, running = true, mode = "runnin
   if (!pat) return null;
 
   // Geometry: a horizontal rail. 0 = fully retracted (left), 1 = deepest (right).
-  const W = 320, H = 96, railY = H / 2, railX0 = 44, railX1 = W - 26;
+  // W tracks the measured container so the rail uses the FULL width; H is fixed,
+  // so preserveAspectRatio can stay "meet" (no distortion — the tip stays round).
+  const W = Math.max(320, vw), railY = H / 2, railX0 = 44, railX1 = W - 26;
   const railLen = railX1 - railX0;
   const x = (v) => railX0 + v * railLen;
   const headX = x(pos);
@@ -134,7 +157,7 @@ export function PatternDiagram({ patternId, name, running = true, mode = "runnin
           {mode === "rest" ? "at rest" : `speed ${Math.round(speed * 100)}%`}
         </span>
       </div>
-      <svg width="100%" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="xMidYMid meet" style={{ height: 104 }} className="block">
+      <svg width="100%" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="xMidYMid meet" style={{ height: 120, width: "100%" }} className="block w-full">
         <defs>
           <linearGradient id="kk-shaft" x1="0" y1="0" x2="0" y2="1">
             <stop offset="0" stopColor="#d9d2e4" />

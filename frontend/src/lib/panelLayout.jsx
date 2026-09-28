@@ -27,7 +27,7 @@ const GRID_COLS_CLASS = {
   4: "lg:grid-cols-4",
   5: "lg:grid-cols-5",
 };
-const COL_SPAN_CLASS = { 1: "", 2: "lg:col-span-2", 3: "lg:col-span-3" };
+const COL_SPAN_CLASS = { 1: "", 2: "lg:col-span-2", 3: "lg:col-span-3", 4: "lg:col-span-4", 5: "lg:col-span-5" };
 
 function clamp(n, min, max) { return Math.min(max, Math.max(min, n)); }
 
@@ -135,7 +135,7 @@ export function createPanelLayout({ storagePrefix, panelDefs, defaultOrder, defa
     }, [widths]);
     const cycle = (id) => setWidths((w) => {
       const cur = w[id] || 1;
-      const next = cur >= 3 ? 1 : cur + 1;  // 1 -> 2 -> 3 -> 1
+      const next = cur >= 5 ? 1 : cur + 1;  // 1 -> 2 -> 3 -> 4 -> 5 -> 1
       return { ...w, [id]: next };
     });
     return { widths, cycle };
@@ -295,9 +295,10 @@ export function createPanelLayout({ storagePrefix, panelDefs, defaultOrder, defa
         ))}
         <div className={`grid gap-6 items-start ${GRID_COLS_CLASS[layout.columnCount] || GRID_COLS_CLASS[DEFAULT_GRID_COLUMNS]}`}>
           {layout.order.zones.slice(1).flat().filter((id) => !layout.hidden.includes(id)).map((id) => {
-            // A panel may span up to 3 columns, but never more than the grid has.
+            // A panel may span up to the full grid width (was capped at 3), so a
+            // panel configured wider than 3 columns fills the whole row.
             const want = widths?.[id] || 1;
-            const span = Math.min(want, layout.columnCount, 3);
+            const span = Math.min(want, layout.columnCount, 5);
             return (
               <div key={id} className={COL_SPAN_CLASS[span] || ""}>
                 <CollapsiblePanel id={id} title={panelDefs[id]?.label || id} collapsed={!!collapsed[id]} onToggle={onToggleCollapse}>

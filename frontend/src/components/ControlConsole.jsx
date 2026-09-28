@@ -368,7 +368,7 @@ export function ControlConsole({ onCommand, disabled = false, autoStart = false,
 
   return (
     <div className="space-y-8" data-testid="control-console">
-      <div className="space-y-7">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-x-8 gap-y-7">
         <ControlSlider id="speed" label="SPEED" value={state.speed} onChange={setParam("speed", cmd.speed)} disabled={disabled} danger max={maxSpeed} limitNote={speedNote} />
         <ControlSlider id="depth" label="DEPTH" value={state.depth} onChange={setParam("depth", cmd.depth)} disabled={disabled} min={minDepth} max={maxDepth} limitNote={depthNote} />
         <ControlSlider id="stroke" label="STROKE" value={state.stroke} onChange={setParam("stroke", cmd.stroke)} disabled={disabled} max={maxStroke} limitNote={strokeNote} />
@@ -377,7 +377,7 @@ export function ControlConsole({ onCommand, disabled = false, autoStart = false,
 
       <div className={disabled ? "opacity-40 pointer-events-none" : ""}>
         <span className="font-display text-xs tracking-[0.15em] text-[var(--kink-text-2)] block mb-3">PATTERN</span>
-        <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 gap-2">
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-2">
           {PATTERNS.map((p) => (
             <button
               key={p.idx}
@@ -403,7 +403,7 @@ export function ControlConsole({ onCommand, disabled = false, autoStart = false,
           <Bookmark size={14} className="text-[var(--kink-purple)]" /> MY PRESETS
         </span>
         {presets.length > 0 && (
-          <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 mb-3">
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-2 mb-3">
             {presets.map((p) => (
               <div
                 key={p.id}
@@ -494,7 +494,7 @@ export function ControlConsole({ onCommand, disabled = false, autoStart = false,
               <span className="font-mono-data text-[10px] uppercase tracking-wide text-[var(--kink-muted)] block mb-2">
                 {group.label}
               </span>
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-2">
                 {group.programs.map((p) => {
                   const active = activeProgram === p.id;
                   return (

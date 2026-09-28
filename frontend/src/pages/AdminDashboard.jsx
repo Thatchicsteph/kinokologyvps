@@ -59,7 +59,10 @@ function StatusPill({ ok, okText, offText }) {
 // ------------------------------------------------------------------
 const PANEL_LAYOUT_STORAGE_KEY = "kinkology_admin_panel_layout_v5";
 const PANEL_COLLAPSE_STORAGE_KEY = "kinkology_admin_panel_collapsed_v1";
-const PANEL_WIDTH_STORAGE_KEY = "kinkology_admin_panel_width_v1";
+const PANEL_WIDTH_STORAGE_KEY = "kinkology_admin_panel_width_v2";
+// Panels that default to a wider span. The OSSM console (toy-control) defaults
+// to the full grid width; the span calc caps it at the live column count.
+const ADMIN_DEFAULT_WIDTHS = { "toy-control": 5 };
 const MIN_GRID_COLUMNS = 1;
 const MAX_GRID_COLUMNS = 5;
 const DEFAULT_GRID_COLUMNS = 3;
@@ -74,11 +77,14 @@ const GRID_COLS_CLASS = {
   5: "lg:grid-cols-5",
 };
 
-// Static so Tailwind's scanner sees them. A wide (span-2) panel occupies two
-// grid columns; capped at the current column count so it never overflows.
+// Static so Tailwind's scanner sees them. A wide panel occupies up to the full
+// grid width; capped at the current column count so it never overflows.
 const COL_SPAN_CLASS = {
   1: "",
   2: "lg:col-span-2",
+  3: "lg:col-span-3",
+  4: "lg:col-span-4",
+  5: "lg:col-span-5",
 };
 
 const PANEL_DEFS = {
@@ -211,21 +217,26 @@ function usePanelCollapse() {
   return { collapsed, toggle };
 }
 
-// Per-panel width span (1 or 2 grid columns). Stored in localStorage, keyed by
-// panel id. A panel set to span 2 occupies two columns of the grid.
+// Per-panel width span (1..MAX_GRID_COLUMNS). Stored in localStorage, keyed by
+// panel id. A panel spans that many grid columns, capped at the live count.
 function usePanelWidth() {
   const [widths, setWidths] = useState(() => {
     try {
       const raw = localStorage.getItem(PANEL_WIDTH_STORAGE_KEY);
-      const parsed = raw ? JSON.parse(raw) : {};
-      return parsed && typeof parsed === "object" ? parsed : {};
-    } catch (_) { return {}; }
+      const parsed = raw ? JSON.parse(raw) : null;
+      // First visit (nothing saved): seed the console panel to full width.
+      if (parsed && typeof parsed === "object") return parsed;
+      return { ...ADMIN_DEFAULT_WIDTHS };
+    } catch (_) { return { ...ADMIN_DEFAULT_WIDTHS }; }
   });
   useEffect(() => {
     try { localStorage.setItem(PANEL_WIDTH_STORAGE_KEY, JSON.stringify(widths)); } catch (_) {}
   }, [widths]);
-  // Cycle 1 -> 2 -> 1
-  const cycle = (id) => setWidths((w) => ({ ...w, [id]: (w[id] === 2 ? 1 : 2) }));
+  // Cycle 1 -> 2 -> ... -> MAX_GRID_COLUMNS -> 1
+  const cycle = (id) => setWidths((w) => {
+    const cur = w[id] || 1;
+    return { ...w, [id]: cur >= MAX_GRID_COLUMNS ? 1 : cur + 1 };
+  });
   return { widths, cycle };
 }
 
@@ -331,8 +342,8 @@ function ColumnEditor({ title, ids, hidden, onReorder, onToggle, zoneIndex, zone
                   type="button"
                   onClick={() => onToggleWidth(id)}
                   data-testid={`panel-width-${id}`}
-                  title={widths?.[id] === 2 ? "Single width" : "Double width (span 2 columns)"}
-                  className={`shrink-0 p-1 transition-colors ${widths?.[id] === 2 ? "text-[var(--kink-purple)]" : "text-[var(--kink-muted)] hover:text-[var(--kink-purple)]"}`}
+                  title={`Width: ${widths?.[id] || 1} column${(widths?.[id] || 1) > 1 ? "s" : ""} — click to widen`}
+                  className={`shrink-0 p-1 transition-colors ${(widths?.[id] || 1) > 1 ? "text-[var(--kink-purple)]" : "text-[var(--kink-muted)] hover:text-[var(--kink-purple)]"}`}
                 >
                   <Columns2 size={15} />
                 </button>
@@ -708,7 +719,7 @@ export default function AdminDashboard() {
         </div>
 
         {!deviceShrunk && (ble.connected || toys.connected) && showTest && (
-          <div className="mt-6 pt-6 border-t border-[var(--kink-overlay)] max-w-md" data-testid="owner-test-console">
+          <div className="mt-6 pt-6 border-t border-[var(--kink-overlay)]" data-testid="owner-test-console">
             <p className="font-display text-xs tracking-[0.15em] text-[var(--kink-text-2)] mb-4">
               OWNER TEST CONTROLS — DIRECT TO {ble.connected && toys.connected ? "DEVICE + TOYS" : ble.connected ? "DEVICE" : "TOYS"}
             </p>
@@ -1227,8 +1238,9 @@ export default function AdminDashboard() {
           .flat()
           .filter((id) => !layout.hidden.includes(id))
           .map((id) => {
-            // A wide panel spans 2 columns, but never more than the grid has.
-            const span = (panelWidths[id] === 2 && layout.columnCount >= 2) ? 2 : 1;
+            // A wide panel spans as many columns as configured, never more than
+            // the grid has (and capped at 5, the widest span class defined).
+            const span = Math.min(panelWidths[id] || 1, layout.columnCount, 5);
             return (
               <div key={id} className={COL_SPAN_CLASS[span] || ""}>
                 <CollapsiblePanel
