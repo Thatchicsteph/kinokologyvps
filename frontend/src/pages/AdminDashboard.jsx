@@ -57,7 +57,7 @@ function StatusPill({ ok, okText, offText }) {
 // Device Activity, and Toy Control, which default to zone 0 (full
 // width) but aren't locked there.
 // ------------------------------------------------------------------
-const PANEL_LAYOUT_STORAGE_KEY = "kinkology_admin_panel_layout_v8";
+const PANEL_LAYOUT_STORAGE_KEY = "kinkology_admin_panel_layout_v9";
 const PANEL_COLLAPSE_STORAGE_KEY = "kinkology_admin_panel_collapsed_v1";
 const PANEL_WIDTH_STORAGE_KEY = "kinkology_admin_panel_width_v2";
 // Panels that default to a wider span. The OSSM console (toy-control) defaults
@@ -146,15 +146,14 @@ const DEFAULT_PANEL_ORDER = {
     // full-width top row — panels that genuinely want the whole width
     ["obs-stream", "toy-control", "session-history"],
     // column 1 — Live: live-session (medium) + device-activity (short);
-    //            Setup: safety-limits (TALL) anchors the column, + base-urls (short)
-    ["live-session", "device-activity", "safety-limits", "base-urls"],
+    //            Setup: safety-limits (TALL) + base-urls + owner-name (short)
+    ["live-session", "device-activity", "safety-limits", "base-urls", "owner-name"],
     // column 2 — Live: recent-activity (medium) + system-health (short);
-    //            Setup: live-overlay (TALL) anchors the column, + theme (short)
+    //            Setup: live-overlay (TALL) + theme-picker (short)
     ["recent-activity", "system-health", "live-overlay", "theme-picker"],
     // column 3 — Live: issued-codes (medium) + new-access-code (short);
-    //            Setup: the remaining mediums/shorts pack to match the tall
-    //            columns: heart-rate + two-factor + recordings + owner-name
-    ["issued-codes", "new-access-code", "heart-rate-sync", "two-factor", "session-recordings", "owner-name"],
+    //            Setup: heart-rate-sync (TALL) + two-factor + recordings
+    ["issued-codes", "new-access-code", "heart-rate-sync", "two-factor", "session-recordings"],
   ],
 };
 
