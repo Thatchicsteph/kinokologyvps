@@ -57,7 +57,7 @@ function StatusPill({ ok, okText, offText }) {
 // Device Activity, and Toy Control, which default to zone 0 (full
 // width) but aren't locked there.
 // ------------------------------------------------------------------
-const PANEL_LAYOUT_STORAGE_KEY = "kinkology_admin_panel_layout_v6";
+const PANEL_LAYOUT_STORAGE_KEY = "kinkology_admin_panel_layout_v7";
 const PANEL_COLLAPSE_STORAGE_KEY = "kinkology_admin_panel_collapsed_v1";
 const PANEL_WIDTH_STORAGE_KEY = "kinkology_admin_panel_width_v2";
 // Panels that default to a wider span. The OSSM console (toy-control) defaults
@@ -136,20 +136,24 @@ const PANEL_SECTION = {
 const sectionOf = (id) => PANEL_SECTION[id] || "live";
 
 // zones[0] = full-width top row; zones[1..3] = the three default grid columns.
-// Ordered so BOTH filtered pages read well:
-//  - Live top: the video stream then the full-width OSSM console.
-//  - Setup top: the wide session-history table.
-//  - Grid columns group each section's remaining panels into balanced columns.
+// Tuned to minimise wasted space in the plain (items-start) grid: only the
+// genuinely wide/tall panels go full-width (Live: stream + OSSM console; Setup:
+// the history table), and each section's remaining panels are distributed so
+// the three columns stack to roughly EQUAL height — short cards grouped with
+// short, medium with medium — so no column strands a tall gap beside a short one.
 const DEFAULT_PANEL_ORDER = {
   zones: [
-    // full-width top row (live: stream, console; setup: history)
+    // full-width top row — panels that genuinely want the whole width
     ["obs-stream", "toy-control", "session-history"],
-    // column 1  (live: live-session, device;  setup: theme, owner, 2FA)
-    ["live-session", "device-activity", "theme-picker", "owner-name", "two-factor"],
-    // column 2  (live: activity, health;  setup: safety-limits, base-urls, recordings)
-    ["recent-activity", "system-health", "safety-limits", "base-urls", "session-recordings"],
-    // column 3  (live: access codes;  setup: HR sync, overlay)
-    ["new-access-code", "issued-codes", "heart-rate-sync", "live-overlay"],
+    // column 1 — Live: live-session (medium) + device-activity (short);
+    //            Setup: safety-limits + two-factor (both medium)
+    ["live-session", "device-activity", "safety-limits", "two-factor"],
+    // column 2 — Live: recent-activity (medium) + system-health (short);
+    //            Setup: heart-rate-sync (medium) + base-urls + overlay (short)
+    ["recent-activity", "system-health", "heart-rate-sync", "base-urls", "live-overlay"],
+    // column 3 — Live: issued-codes (medium) + new-access-code (short);
+    //            Setup: session-recordings (medium) + theme + owner (short)
+    ["issued-codes", "new-access-code", "session-recordings", "theme-picker", "owner-name"],
   ],
 };
 
