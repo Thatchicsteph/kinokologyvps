@@ -9,6 +9,7 @@ const THEMES = [
   { id: "neon",    label: "NEON",    hint: "Magenta + cyan on deep indigo" },
   { id: "dungeon", label: "DUNGEON", hint: "Red + amber on charred black" },
   { id: "moody",   label: "MOODY",   hint: "Blue + rose on midnight" },
+  { id: "aurora",  label: "AURORA",  hint: "Emerald + gold on charcoal-teal" },
 ];
 
 /**

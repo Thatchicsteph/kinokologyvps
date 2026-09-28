@@ -688,7 +688,7 @@ async def load_settings() -> dict:
         "whep_external_url": doc.get("whep_external_url", "") or "",
     }
 
-VALID_THEMES = {"kink", "neon", "dungeon", "moody"}
+VALID_THEMES = {"kink", "neon", "dungeon", "moody", "aurora"}
 
 @api_router.get("/settings/theme")
 async def get_theme():

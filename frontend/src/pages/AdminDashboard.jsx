@@ -109,6 +109,32 @@ const PANEL_DEFS = {
 
 const ALL_PANEL_IDS = Object.keys(PANEL_DEFS);
 
+// Live vs Setup classification. "Live" = things you touch/watch DURING a session
+// (stream, device, controls, who's connected, health). "Setup" = configure-once
+// (theme, names, URLs, 2FA, safety limits, access codes, recordings/history are
+// review). Panels sort live-first within the grid and a SETUP divider is drawn
+// before the first setup panel — the customizer still moves/hides any panel.
+const PANEL_SECTION = {
+  "obs-stream": "live",
+  "device-activity": "live",
+  "toy-control": "live",
+  "live-session": "live",
+  "recent-activity": "live",
+  "system-health": "live",
+  "heart-rate-sync": "live",
+  "live-overlay": "live",
+  "session-recordings": "setup",
+  "session-history": "setup",
+  "theme-picker": "setup",
+  "owner-name": "setup",
+  "two-factor": "setup",
+  "base-urls": "setup",
+  "safety-limits": "setup",
+  "new-access-code": "setup",
+  "issued-codes": "setup",
+};
+const sectionOf = (id) => PANEL_SECTION[id] || "live";
+
 // zones[0] = full-width row; zones[1] / zones[2] = the two default grid
 // columns. Total zone count is always 1 (top) + columnCount (grid).
 const DEFAULT_PANEL_ORDER = {
@@ -1234,12 +1260,17 @@ export default function AdminDashboard() {
       ))}
 
       <div className={`grid gap-6 items-start ${GRID_COLS_CLASS[layout.columnCount] || GRID_COLS_CLASS[DEFAULT_GRID_COLUMNS]}`}>
-        {layout.order.zones.slice(1)
-          .flat()
-          .filter((id) => !layout.hidden.includes(id))
-          .map((id) => {
-            // A wide panel spans as many columns as configured, never more than
-            // the grid has (and capped at 5, the widest span class defined).
+        {(() => {
+          const visible = layout.order.zones.slice(1)
+            .flat()
+            .filter((id) => !layout.hidden.includes(id));
+          // Stable sort: live panels first, setup panels after, each keeping the
+          // user's existing order. This groups the two sections without touching
+          // the zone/customizer machinery.
+          const live = visible.filter((id) => sectionOf(id) === "live");
+          const setup = visible.filter((id) => sectionOf(id) === "setup");
+          const out = [];
+          const renderPanel = (id) => {
             const span = Math.min(panelWidths[id] || 1, layout.columnCount, 5);
             return (
               <div key={id} className={COL_SPAN_CLASS[span] || ""}>
@@ -1253,7 +1284,24 @@ export default function AdminDashboard() {
                 </CollapsiblePanel>
               </div>
             );
-          })}
+          };
+          const SectionHeading = ({ label, hint }) => (
+            <div key={`section-${label}`} className="col-span-full flex items-center gap-3 mt-2 first:mt-0">
+              <span className="font-display font-black uppercase tracking-[0.18em] text-xs text-[var(--kink-text-2)]">{label}</span>
+              <span className="font-mono-data text-[10px] text-[var(--kink-muted)] hidden sm:inline">{hint}</span>
+              <span className="flex-1 h-px bg-[var(--kink-overlay)]" />
+            </div>
+          );
+          if (live.length) {
+            out.push(<SectionHeading key="h-live" label="Live" hint="what you touch during a session" />);
+            live.forEach((id) => out.push(renderPanel(id)));
+          }
+          if (setup.length) {
+            out.push(<SectionHeading key="h-setup" label="Setup" hint="configure once" />);
+            setup.forEach((id) => out.push(renderPanel(id)));
+          }
+          return out;
+        })()}
       </div>
 
       <PanelCustomizer

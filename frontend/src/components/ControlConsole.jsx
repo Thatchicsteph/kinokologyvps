@@ -367,15 +367,15 @@ export function ControlConsole({ onCommand, disabled = false, autoStart = false,
   const strokeNote = maxStroke < 100 ? `max ${maxStroke} at this depth` : null;
 
   return (
-    <div className="space-y-8" data-testid="control-console">
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-x-8 gap-y-7">
+    <div className="flex flex-col gap-8" data-testid="control-console">
+      <div className="order-1 grid grid-cols-1 lg:grid-cols-2 gap-x-8 gap-y-7">
         <ControlSlider id="speed" label="SPEED" value={state.speed} onChange={setParam("speed", cmd.speed)} disabled={disabled} danger max={maxSpeed} limitNote={speedNote} />
         <ControlSlider id="depth" label="DEPTH" value={state.depth} onChange={setParam("depth", cmd.depth)} disabled={disabled} min={minDepth} max={maxDepth} limitNote={depthNote} />
         <ControlSlider id="stroke" label="STROKE" value={state.stroke} onChange={setParam("stroke", cmd.stroke)} disabled={disabled} max={maxStroke} limitNote={strokeNote} />
         <ControlSlider id="sensation" label="SENSATION" value={state.sensation} onChange={setParam("sensation", cmd.sensation)} disabled={disabled} />
       </div>
 
-      <div className={disabled ? "opacity-40 pointer-events-none" : ""}>
+      <div className={`order-4 ${disabled ? "opacity-40 pointer-events-none" : ""}`}>
         <span className="font-display text-xs tracking-[0.15em] text-[var(--kink-text-2)] block mb-3">PATTERN</span>
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-2">
           {PATTERNS.map((p) => (
@@ -398,7 +398,7 @@ export function ControlConsole({ onCommand, disabled = false, autoStart = false,
         </div>
       </div>
 
-      <div className={disabled ? "opacity-40 pointer-events-none" : ""} data-testid="presets-section">
+      <div className={`order-5 ${disabled ? "opacity-40 pointer-events-none" : ""}`} data-testid="presets-section">
         <span className="font-display text-xs tracking-[0.15em] text-[var(--kink-text-2)] flex items-center gap-2 mb-3">
           <Bookmark size={14} className="text-[var(--kink-purple)]" /> MY PRESETS
         </span>
@@ -461,7 +461,7 @@ export function ControlConsole({ onCommand, disabled = false, autoStart = false,
         )}
       </div>
 
-      <div className={disabled ? "opacity-40 pointer-events-none" : ""}>
+      <div className={`order-3 ${disabled ? "opacity-40 pointer-events-none" : ""}`}>
         <span className="font-display text-xs tracking-[0.15em] text-[var(--kink-text-2)] flex items-center gap-2 mb-3">
           <Zap size={14} className="text-[var(--kink-purple)]" /> AUTO PROGRAMS
         </span>
@@ -539,7 +539,7 @@ export function ControlConsole({ onCommand, disabled = false, autoStart = false,
         onClick={toggleRun}
         disabled={disabled}
         data-testid="start-stop-button"
-        className={`w-full h-20 flex items-center justify-center gap-3 font-display text-xl tracking-[0.2em] font-black transition-transform active:scale-95 disabled:opacity-40 ${
+        className={`order-2 w-full h-20 flex items-center justify-center gap-3 font-display text-xl tracking-[0.2em] font-black transition-transform active:scale-95 disabled:opacity-40 ${
           running
             ? "bg-[var(--kink-danger)] text-white pulse-danger"
             : "bg-[var(--kink-purple)] text-[var(--kink-base)] glow-purple"
