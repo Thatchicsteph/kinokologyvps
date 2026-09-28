@@ -341,18 +341,7 @@ function ColumnEditor({ title, ids, hidden, onReorder, onToggle, zoneIndex, zone
               className={`flex items-center gap-1.5 border border-[var(--kink-overlay)] px-3 py-2 cursor-grab active:cursor-grabbing select-none bg-[var(--kink-base)] ${isHidden ? "opacity-50" : ""}`}
             >
               <GripVertical size={14} className="text-[var(--kink-muted)] shrink-0" />
-              <span className="flex-1 font-mono-data text-sm truncate">{def.label}</span>
-              <span
-                data-testid={`panel-section-${id}`}
-                title={sectionOf(id) === "setup" ? "Shows on the Setup page" : "Shows on the Live page"}
-                className={`shrink-0 font-mono-data text-[9px] uppercase tracking-wide px-1.5 py-0.5 border ${
-                  sectionOf(id) === "setup"
-                    ? "border-[var(--kink-overlay)] text-[var(--kink-muted)]"
-                    : "border-[var(--kink-purple)]/40 text-[var(--kink-purple)]"
-                }`}
-              >
-                {sectionOf(id) === "setup" ? "Setup" : "Live"}
-              </span>
+              <span className="flex-1 min-w-0 font-mono-data text-sm truncate" title={def.label}>{def.label}</span>
               {movable && (
                 <>
                   <button
@@ -445,7 +434,7 @@ function PanelCustomizer({ open, onClose, layout, setColumnCount, setZoneOrder, 
         zoneCount={zoneCount}
         onMove={moveToZone}
       />
-      <div className={`grid gap-x-6 sm:grid-cols-2 ${layout.columnCount >= 3 ? "lg:grid-cols-3" : ""}`}>
+      <div className="grid gap-x-6 grid-cols-1">
         {layout.order.zones.slice(1).map((ids, gridIdx) => {
           const zoneIndex = gridIdx + 1;
           return (
