@@ -1,0 +1,44 @@
+{
+	email thatchicstephanie@gmail.com
+}
+
+# ---------------------------------------------------------------------------
+# App routing: /api/* (incl. WebSockets) -> backend, everything else -> SPA
+# ---------------------------------------------------------------------------
+(app) {
+	handle /api/* {
+		reverse_proxy backend:8001
+	}
+	handle {
+		root * /srv
+		try_files {path} /index.html
+		file_server
+	}
+}
+
+# ---------------------------------------------------------------------------
+# Kinkology app. Domain comes from the DOMAIN env var (set it in .env).
+# ---------------------------------------------------------------------------
+{$DOMAIN:ChangeMe} {
+	import app
+}
+
+# ---------------------------------------------------------------------------
+# MediaMTX WebRTC stream front-door. This container's Caddy terminates TLS for
+# the stream subdomain and proxies WHEP (SDP over POST) to MediaMTX's HTTP
+# WebRTC port. We target the VPS's own address rather than the docker bridge:
+# MediaMTX listens on *:8889 and ufw allows 8889/tcp on the public interface,
+# whereas docker-bridge -> host traffic is filtered separately by ufw.
+#
+# STREAM_UPSTREAM defaults to host.docker.internal:8889; override it in .env
+# with the VPS IP (e.g. 85.190.108.159:8889) if the bridge route is blocked.
+# Set STREAM_DOMAIN in .env (e.g. streamtg30.ddns.net).
+# ---------------------------------------------------------------------------
+{$STREAM_DOMAIN:stream.invalid} {
+	reverse_proxy {$STREAM_UPSTREAM:host.docker.internal:8889}
+}
+
+# Local owner access on the host: http://localhost
+http://localhost {
+	import app
+}

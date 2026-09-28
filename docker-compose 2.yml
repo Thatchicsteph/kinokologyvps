@@ -1,0 +1,136 @@
+services:
+  mongo:
+    image: mongo:7.0
+    restart: unless-stopped
+    # Cap the WiredTiger cache so Mongo doesn't grab ~50% of host RAM by
+    # default. 0.25 GB keeps it comfortable on a 1 GB VPS; raise on a bigger
+    # box if you have a large dataset.
+    command: ["--wiredTigerCacheSizeGB", "0.25"]
+    volumes:
+      - mongo_data:/data/db
+    networks:
+      - kinkology
+    # Restart Mongo if it stops answering pings (e.g. wedged under memory
+    # pressure). mongosh ships in the mongo:7.0 image.
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.75"
+          memory: 512M
+    # Compose v1 / `docker-compose` (not `docker compose`) ignores the
+    # deploy.resources block above; these top-level keys enforce the same
+    # caps there. Harmless duplication for portability across both CLIs.
+    mem_limit: 512m
+    cpus: 0.75
+
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    environment:
+      MONGO_URL: mongodb://mongo:27017
+      DB_NAME: kinkology
+      CORS_ORIGINS: ${CORS_ORIGINS:-}
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env (copy env.docker.example to .env)}
+      # WebRTC direct-UDP fallbacks — leave blank to route mobile viewers via
+      # Cloudflare TURN relay (recommended, works over any NAT/carrier). Only
+      # opt into these if you know your network can do direct UDP (same-LAN
+      # phones, or router with UDP port forwarding). Setting them enables the
+      # aioice port-range + host-IP rewrite patch which is untested against
+      # every TURN client and can break Cloudflare relay for mobile viewers.
+      STREAM_UDP_MIN: ${STREAM_UDP_MIN:-}
+      STREAM_UDP_MAX: ${STREAM_UDP_MAX:-}
+      # STUN servers (comma-separated). Defaults to Google + Cloudflare public
+      # STUN; override in .env only if you need private/self-hosted STUN.
+      STREAM_STUN_SERVERS: ${STREAM_STUN_SERVERS:-}
+      # Optional STATIC TURN relay if you're not using the built-in Cloudflare
+      # Calls one-click. Leave blank to use the admin UI card instead.
+      STREAM_TURN_URL: ${STREAM_TURN_URL:-}
+      STREAM_TURN_USERNAME: ${STREAM_TURN_USERNAME:-}
+      STREAM_TURN_PASSWORD: ${STREAM_TURN_PASSWORD:-}
+      # Advertised host IP in ICE candidates — leave blank to let aioice
+      # pick from real interfaces (works when the TURN relay carries traffic).
+      STREAM_PUBLIC_IP: ${STREAM_PUBLIC_IP:-}
+      STREAM_PEER_IP: ${STREAM_PEER_IP:-}
+    ports:
+      # Direct WebRTC UDP path. Publishes the ICE port range so remote viewers
+      # can connect directly (srflx) instead of going through the TURN relay.
+      # Requires STREAM_UDP_MIN/MAX + STREAM_PUBLIC_IP set in .env AND this same
+      # range forwarded on your router to this host. If you can't forward ports,
+      # comment this out and ICE falls back to the Cloudflare TURN relay.
+      - "50000-50099:50000-50099/udp"
+    depends_on:
+      - mongo
+    networks:
+      - kinkology
+    # Health probe: if the API stops answering (hung, deadlocked, or wedged by
+    # memory pressure) Docker marks the container unhealthy and — combined with
+    # restart: unless-stopped — restarts it. Uses python since the slim image
+    # has no curl. /api/health is unauthenticated and pings Mongo. start_period
+    # gives uvicorn+Mongo time to come up on boot.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8001/api/health', timeout=5).status==200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    # aiortc relay: CPU cost scales with viewer count (SRTP encryption per
+    # stream), not resolution. 1 CPU / 512M suits 1 publisher + ~10 viewers
+    # on a small VPS; raise cpus for more concurrent viewers.
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+    mem_limit: 512m
+    cpus: 1.0
+    # Docker Desktop for Mac needs this to resolve host.docker.internal from
+    # inside the container (already implicit on Docker Desktop, explicit on
+    # native Linux where it maps to the host gateway).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  web:
+    build:
+      context: ./frontend
+      args:
+        REACT_APP_BACKEND_URL: ""
+    restart: unless-stopped
+    environment:
+      DOMAIN: ${DOMAIN:-ChangeMe}
+      STREAM_DOMAIN: ${STREAM_DOMAIN:-stream.invalid}
+      STREAM_UPSTREAM: ${STREAM_UPSTREAM:-host.docker.internal:8889}
+    ports:
+      - "80:80"
+      - "443:443"
+    # Let the container reach MediaMTX running on the VPS host (127.0.0.1:8889).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - backend
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - kinkology
+    # Caddy static file server + TLS — very light.
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 128M
+    mem_limit: 128m
+    cpus: 0.5
+
+volumes:
+  mongo_data:
+  caddy_data:
+  caddy_config:
+
+networks:
+  kinkology:
