@@ -263,12 +263,35 @@ async def get_current_user(request: Request) -> dict:
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid token")
 
+# Roles with full owner-level access. Accounts created before roles existed
+# have no "role" field and are treated as owners so nothing breaks.
+OWNER_ROLES = {"admin", "owner"}
+
+def user_role(user: dict) -> str:
+    return (user.get("role") or "owner").strip().lower()
+
+def is_owner(user: dict) -> bool:
+    return user_role(user) in OWNER_ROLES
+
+async def require_owner(user: dict = Depends(get_current_user)) -> dict:
+    """Gate owner-only endpoints (URLs, safety limits, moderator management).
+    Moderators pass authentication but are refused here."""
+    if not is_owner(user):
+        raise HTTPException(status_code=403,
+                            detail="This action is restricted to the owner account.")
+    return user
+
 # ------------------------------------------------------------------
 # Models
 # ------------------------------------------------------------------
 class LoginInput(BaseModel):
     email: str
     password: str
+
+class ModeratorCreate(BaseModel):
+    email: str
+    password: str
+    name: str = "Moderator"
 
 class SetupInput(BaseModel):
     email: str
@@ -379,7 +402,7 @@ async def setup_admin(body: SetupInput, request: Request, response: Response):
     response.set_cookie("access_token", token, httponly=True, secure=True,
                         samesite="lax", max_age=604800, path="/")
     await log_event("security", "owner_created", actor=email, ip=client_ip(request))
-    return {"token": token, "user": {"id": uid, "email": email, "name": "Admin"}}
+    return {"token": token, "user": {"id": uid, "email": email, "name": "Admin", "role": "owner"}}
 
 @api_router.post("/auth/login")
 @limiter.limit("10/minute")
@@ -400,7 +423,8 @@ async def login(body: LoginInput, request: Request, response: Response):
     response.set_cookie("access_token", token, httponly=True, secure=True,
                         samesite="lax", max_age=604800, path="/")
     await log_event("security", "login_success", actor=email, ip=client_ip(request))
-    return {"token": token, "user": {"id": uid, "email": email, "name": user.get("name", "Admin")}}
+    return {"token": token, "user": {"id": uid, "email": email, "name": user.get("name", "Admin"),
+                                     "role": "owner" if is_owner(user) else user_role(user)}}
 
 @api_router.post("/auth/2fa/login")
 @limiter.limit("10/minute")
@@ -437,7 +461,8 @@ async def twofa_login(body: TwoFALogin, request: Request, response: Response):
     await log_event("security", "login_success",
                     actor=email, ip=client_ip(request),
                     detail={"method": "recovery_code" if body.recovery_code else "totp"})
-    return {"token": token, "user": {"id": uid, "email": email, "name": user.get("name", "Admin")}}
+    return {"token": token, "user": {"id": uid, "email": email, "name": user.get("name", "Admin"),
+                                     "role": "owner" if is_owner(user) else user_role(user)}}
 
 @api_router.get("/auth/2fa/status")
 async def twofa_status(user: dict = Depends(get_current_user)):
@@ -501,7 +526,56 @@ async def logout(response: Response):
 
 @api_router.get("/auth/me")
 async def me(user: dict = Depends(get_current_user)):
-    return {"id": user["id"], "email": user["email"], "name": user.get("name", "Admin")}
+    return {"id": user["id"], "email": user["email"], "name": user.get("name", "Admin"),
+            "role": "owner" if is_owner(user) else user_role(user)}
+
+# ------------------------------------------------------------------
+# Moderator management (owner-only)
+# ------------------------------------------------------------------
+def moderator_public(doc: dict) -> dict:
+    return {
+        "id": str(doc["_id"]),
+        "email": doc["email"],
+        "name": doc.get("name", "Moderator"),
+        "twofa_enabled": bool(doc.get("twofa_enabled")),
+        "created_at": doc.get("created_at"),
+    }
+
+@api_router.get("/moderators")
+async def list_moderators(user: dict = Depends(require_owner)):
+    docs = await db.users.find({"role": "moderator"}).sort("created_at", -1).to_list(200)
+    return [moderator_public(d) for d in docs]
+
+@api_router.post("/moderators")
+async def create_moderator(body: ModeratorCreate, request: Request,
+                           user: dict = Depends(require_owner)):
+    email = body.email.strip().lower()
+    if "@" not in email or "." not in email:
+        raise HTTPException(status_code=400, detail="Enter a valid email address.")
+    if len(body.password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters.")
+    if await db.users.find_one({"email": email}):
+        raise HTTPException(status_code=409, detail="An account with that email already exists.")
+    doc = {
+        "email": email,
+        "password_hash": hash_password(body.password),
+        "name": body.name.strip() or "Moderator",
+        "role": "moderator",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    res = await db.users.insert_one(doc)
+    doc["_id"] = res.inserted_id
+    await log_event("security", "moderator_created", actor=user["email"], target=email)
+    return moderator_public(doc)
+
+@api_router.delete("/moderators/{mod_id}")
+async def delete_moderator(mod_id: str, user: dict = Depends(require_owner)):
+    target = await db.users.find_one({"_id": parse_object_id(mod_id)})
+    if not target or user_role(target) != "moderator":
+        raise HTTPException(status_code=404, detail="Moderator not found.")
+    await db.users.delete_one({"_id": target["_id"]})
+    await log_event("security", "moderator_deleted", actor=user["email"], target=target["email"])
+    return {"ok": True}
 
 # ------------------------------------------------------------------
 # Access code admin routes
@@ -713,7 +787,7 @@ async def get_settings(user: dict = Depends(get_current_user)):
     return await load_settings()
 
 @api_router.put("/settings")
-async def put_settings(body: SettingsInput, user: dict = Depends(get_current_user)):
+async def put_settings(body: SettingsInput, user: dict = Depends(require_owner)):
     data = {
         "min_depth": body.min_depth, "max_speed": body.max_speed, "hr_cutoff": body.hr_cutoff,
         "toy_length_mm": body.toy_length_mm, "rail_travel_mm": body.rail_travel_mm,
@@ -733,7 +807,7 @@ async def put_settings(body: SettingsInput, user: dict = Depends(get_current_use
     return await load_settings()
 
 @api_router.put("/settings/urls")
-async def put_url_settings(body: UrlSettingsInput, user: dict = Depends(get_current_user)):
+async def put_url_settings(body: UrlSettingsInput, user: dict = Depends(require_owner)):
     data = {"local_url": body.local_url.strip(), "public_url": body.public_url.strip(),
             "whep_external_url": body.whep_external_url.strip()}
     await db.settings.update_one({"_id": "global"}, {"$set": data}, upsert=True)
@@ -1191,10 +1265,15 @@ async def put_overlay_config(body: OverlayConfigInput, user: dict = Depends(get_
 # ------------------------------------------------------------------
 # Audit & activity log routes
 # ------------------------------------------------------------------
-def _log_query(category, q, start, end):
+def _log_query(category, q, start, end, actors=None):
     query = {}
     if category in ("security", "session"):
         query["category"] = category
+    if actors is not None:
+        # Restrict to events whose actor is one of these emails (used by the
+        # moderator-actions view). An empty list can never match, which is the
+        # correct result when there are no moderators.
+        query["actor"] = {"$in": list(actors)}
     if start or end:
         ts = {}
         if start:
@@ -1207,6 +1286,13 @@ def _log_query(category, q, start, end):
         query["$or"] = [{"action": rx}, {"actor": rx}, {"target": rx}]
     return query
 
+async def moderator_emails() -> list:
+    """Current moderator login emails, for scoping the audit view to their
+    actions. Resolved live so a renamed/removed moderator's history stays
+    attributed to the email that performed each action."""
+    docs = await db.users.find({"role": "moderator"}, {"email": 1}).to_list(500)
+    return [d["email"] for d in docs if d.get("email")]
+
 @api_router.get("/logs")
 async def list_logs(
     user: dict = Depends(get_current_user),
@@ -1214,11 +1300,13 @@ async def list_logs(
     q: Optional[str] = None,
     start: Optional[str] = None,
     end: Optional[str] = None,
+    moderators_only: bool = False,
     limit: int = 100,
     skip: int = 0,
 ):
     limit = max(1, min(500, limit))
-    query = _log_query(category, q, start, end)
+    actors = await moderator_emails() if moderators_only else None
+    query = _log_query(category, q, start, end, actors=actors)
     total = await db.audit_logs.count_documents(query)
     docs = await db.audit_logs.find(query).sort("ts", -1).skip(max(0, skip)).limit(limit).to_list(limit)
     return {"items": [log_public(d) for d in docs], "total": total, "limit": limit, "skip": skip}
@@ -1238,8 +1326,10 @@ async def export_logs(
     q: Optional[str] = None,
     start: Optional[str] = None,
     end: Optional[str] = None,
+    moderators_only: bool = False,
 ):
-    query = _log_query(category, q, start, end)
+    actors = await moderator_emails() if moderators_only else None
+    query = _log_query(category, q, start, end, actors=actors)
     docs = await db.audit_logs.find(query).sort("ts", -1).to_list(100000)
     items = [log_public(d) for d in docs]
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")

@@ -28,7 +28,7 @@ import { fmtTime } from "@/lib/api";
 import { webBluetoothSupported } from "@/lib/ossm";
 import { PATTERNS } from "@/lib/ossm";
 import { ALL_PROGRAMS } from "@/components/ControlConsole";
-import { LogOut, Bluetooth, BluetoothConnected, Power, SkipForward, Plus, Copy, Trash2, Ban, Clock, Activity, Ticket, Sliders, Heart, Eye, Settings2, GripVertical, EyeOff, X, ChevronUp, ChevronDown, MessageSquare, Zap, Columns2 } from "lucide-react";
+import { LogOut, Bluetooth, BluetoothConnected, Power, SkipForward, Plus, Copy, Trash2, Ban, Clock, Activity, Ticket, Sliders, Heart, Eye, Settings2, GripVertical, EyeOff, X, ChevronUp, ChevronDown, MessageSquare, Zap, Columns2, UserPlus } from "lucide-react";
 import kinkologyMark from "@/assets/kinkology-mark.png";
 import { toast } from "sonner";
 
@@ -57,7 +57,7 @@ function StatusPill({ ok, okText, offText }) {
 // Device Activity, and Toy Control, which default to zone 0 (full
 // width) but aren't locked there.
 // ------------------------------------------------------------------
-const PANEL_LAYOUT_STORAGE_KEY = "kinkology_admin_panel_layout_v9";
+const PANEL_LAYOUT_STORAGE_KEY = "kinkology_admin_panel_layout_v10";
 const PANEL_COLLAPSE_STORAGE_KEY = "kinkology_admin_panel_collapsed_v1";
 const PANEL_WIDTH_STORAGE_KEY = "kinkology_admin_panel_width_v2";
 // Panels that default to a wider span. The OSSM console (toy-control) defaults
@@ -105,9 +105,16 @@ const PANEL_DEFS = {
   "heart-rate-sync": { label: "Heart Rate Sync" },
   "new-access-code": { label: "New Access Code" },
   "issued-codes": { label: "Issued Codes" },
+  "moderators": { label: "Moderators" },
 };
 
 const ALL_PANEL_IDS = Object.keys(PANEL_DEFS);
+
+// Panels only the OWNER may see/use. Moderators can create codes, manage the
+// queue and remove chat, but must not touch URLs, safety limits, or manage
+// other moderator logins. Backend enforces this too (require_owner) — this is
+// just the matching UI hiding.
+const OWNER_ONLY_PANELS = new Set(["base-urls", "safety-limits", "moderators"]);
 
 // Live vs Setup classification. "Live" = things you touch/watch DURING a session
 // (stream, device, controls, who's connected, health). "Setup" = configure-once
@@ -132,6 +139,7 @@ const PANEL_SECTION = {
   "two-factor": "setup",
   "base-urls": "setup",
   "safety-limits": "setup",
+  "moderators": "setup",
 };
 const sectionOf = (id) => PANEL_SECTION[id] || "live";
 
@@ -149,8 +157,8 @@ const DEFAULT_PANEL_ORDER = {
     //            Setup: safety-limits (TALL) + base-urls + owner-name (short)
     ["live-session", "device-activity", "safety-limits", "base-urls", "owner-name"],
     // column 2 — Live: recent-activity (medium) + system-health (short);
-    //            Setup: live-overlay (TALL) + theme-picker (short)
-    ["recent-activity", "system-health", "live-overlay", "theme-picker"],
+    //            Setup: live-overlay (TALL) + theme-picker (short) + moderators (owner-only)
+    ["recent-activity", "system-health", "live-overlay", "theme-picker", "moderators"],
     // column 3 — Live: issued-codes (medium) + new-access-code (short);
     //            Setup: heart-rate-sync (TALL) + two-factor + recordings
     ["issued-codes", "new-access-code", "heart-rate-sync", "two-factor", "session-recordings"],
@@ -322,12 +330,14 @@ function CollapsiblePanel({ id, title, collapsed, onToggle, children }) {
   );
 }
 
-function ColumnEditor({ title, ids, hidden, onReorder, onToggle, zoneIndex, zoneCount, onMove, widths, onToggleWidth, section }) {
+function ColumnEditor({ title, ids, hidden, onReorder, onToggle, zoneIndex, zoneCount, onMove, widths, onToggleWidth, section, canSeePanel }) {
   const movable = typeof onMove === "function" && zoneCount > 1;
   // When a section is given, show only that section's panels; reorder callbacks
   // receive just this filtered subset (the caller reconciles it back into the
   // full zone). Without a section, behave exactly as before (all panels).
-  const shownIds = section ? ids.filter((id) => sectionOf(id) === section) : ids;
+  // canSeePanel also drops owner-only panels for moderators.
+  const canSee = canSeePanel || (() => true);
+  const shownIds = (section ? ids.filter((id) => sectionOf(id) === section) : ids).filter(canSee);
   if (section && shownIds.length === 0) return null;
   return (
     <div className="mb-5">
@@ -401,7 +411,7 @@ function ColumnEditor({ title, ids, hidden, onReorder, onToggle, zoneIndex, zone
   );
 }
 
-function PanelCustomizer({ open, onClose, layout, setColumnCount, setZoneOrder, moveToZone, toggleHidden, resetLayout, widths, onToggleWidth, section = "live" }) {
+function PanelCustomizer({ open, onClose, layout, setColumnCount, setZoneOrder, moveToZone, toggleHidden, resetLayout, widths, onToggleWidth, section = "live", canSeePanel }) {
   if (!open) return null;
   const columnNums = Array.from({ length: MAX_GRID_COLUMNS - MIN_GRID_COLUMNS + 1 }, (_, i) => i + MIN_GRID_COLUMNS);
   const zoneCount = layout.order.zones.length; // 1 (top) + columnCount
@@ -412,9 +422,10 @@ function PanelCustomizer({ open, onClose, layout, setColumnCount, setZoneOrder, 
   // section be reordered independently without dropping the other's panels.
   const reorderSection = (zoneIndex, section, newSectionIds) => {
     const zone = layout.order.zones[zoneIndex] || [];
+    const canSee = canSeePanel || (() => true);
     let k = 0;
     const merged = zone.map((id) =>
-      sectionOf(id) === section ? newSectionIds[k++] : id
+      (sectionOf(id) === section && canSee(id)) ? newSectionIds[k++] : id
     );
     setZoneOrder(zoneIndex, merged);
   };
@@ -430,6 +441,7 @@ function PanelCustomizer({ open, onClose, layout, setColumnCount, setZoneOrder, 
       <ColumnEditor
         title="TOP (FULL-WIDTH)"
         section={section}
+        canSeePanel={canSeePanel}
         ids={layout.order.zones[TOP_ZONE]}
         hidden={layout.hidden}
         onReorder={(ids) => reorderSection(TOP_ZONE, section, ids)}
@@ -446,6 +458,7 @@ function PanelCustomizer({ open, onClose, layout, setColumnCount, setZoneOrder, 
               key={`grid-col-${section}-${gridIdx}`}
               title={`COLUMN ${gridIdx + 1}`}
               section={section}
+              canSeePanel={canSeePanel}
               ids={ids}
               hidden={layout.hidden}
               onReorder={(newIds) => reorderSection(zoneIndex, section, newIds)}
@@ -532,6 +545,11 @@ export default function AdminDashboard() {
   // bookmarkable page — but both routes render the SAME element instance, so
   // React Router does not remount on switch and the BLE/WS connection survives.
   const section = location.pathname.startsWith("/admin/setup") ? "setup" : "live";
+  // Owner vs moderator. Missing role (older accounts) counts as owner. Moderators
+  // may create codes, manage the queue and remove chat, but cannot see or reach
+  // the URL, safety-limit, or moderator-management panels (backend also enforces).
+  const isOwner = !user || (user.role || "owner") === "owner";
+  const canSeePanel = (id) => !OWNER_ONLY_PANELS.has(id) || isOwner;
   const bleRef = useRef(null);
   const toys = useToys({
     onStatusChange: ({ available, pattern }) => {
@@ -726,6 +744,7 @@ export default function AdminDashboard() {
         <ReactionBar onReact={sendReaction} disabled={!ble.wsConnected} />
       </div>
     ),
+    "moderators": <ModeratorsPanel key="moderators-panel" />,
     "device-activity": (
       <div className="hud-panel p-5 sm:p-6" key="device-activity-panel">
         <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
@@ -1327,7 +1346,7 @@ export default function AdminDashboard() {
         </div>
       </header>
 
-      {layout.order.zones[TOP_ZONE].filter((id) => !layout.hidden.includes(id) && sectionOf(id) === section).map((id) => (
+      {layout.order.zones[TOP_ZONE].filter((id) => !layout.hidden.includes(id) && sectionOf(id) === section && canSeePanel(id)).map((id) => (
         <div className="mb-6" key={`top-${id}`}>
           <CollapsiblePanel id={id} title={PANEL_DEFS[id]?.label || id} collapsed={!!panelCollapsed[id]} onToggle={togglePanelCollapse}>
             {panelNodes[id]}
@@ -1342,7 +1361,7 @@ export default function AdminDashboard() {
           // ones appear on the current page.
           const visible = layout.order.zones.slice(1)
             .flat()
-            .filter((id) => !layout.hidden.includes(id) && sectionOf(id) === section);
+            .filter((id) => !layout.hidden.includes(id) && sectionOf(id) === section && canSeePanel(id));
           return visible.map((id) => {
             const span = Math.min(panelWidths[id] || 1, layout.columnCount, 5);
             return (
@@ -1361,7 +1380,7 @@ export default function AdminDashboard() {
         })()}
       </div>
 
-      {layout.order.zones.flat().filter((id) => !layout.hidden.includes(id) && sectionOf(id) === section).length === 0 && (
+      {layout.order.zones.flat().filter((id) => !layout.hidden.includes(id) && sectionOf(id) === section && canSeePanel(id)).length === 0 && (
         <p className="font-mono-data text-sm text-[var(--kink-muted)] text-center py-12" data-testid="section-empty">
           No {section === "setup" ? "Setup" : "Live"} panels are visible. Use CUSTOMIZE to unhide panels.
         </p>
@@ -1379,6 +1398,7 @@ export default function AdminDashboard() {
         widths={panelWidths}
         onToggleWidth={cyclePanelWidth}
         section={section}
+        canSeePanel={canSeePanel}
       />
     </div>
   );
@@ -1389,6 +1409,103 @@ function Stat({ label, value, mono }) {
     <div className="bg-[var(--kink-base)] border border-[var(--kink-overlay)] px-3 py-4">
       <p className="font-display text-[10px] tracking-[0.15em] text-[var(--kink-muted)]">{label}</p>
       <p className={`mt-1.5 truncate ${mono ? "font-mono-data" : "font-display"} font-bold text-lg text-white`}>{value}</p>
+    </div>
+  );
+}
+
+// Owner-only panel: create/list/remove moderator logins. Moderators can create
+// codes, manage the queue and remove chat, but never reach URLs, safety limits,
+// or this panel. The backend enforces the same via require_owner.
+function ModeratorsPanel() {
+  const [mods, setMods] = React.useState([]);
+  const [email, setEmail] = React.useState("");
+  const [name, setName] = React.useState("");
+  const [password, setPassword] = React.useState("");
+  const [busy, setBusy] = React.useState(false);
+
+  const load = React.useCallback(async () => {
+    try { const { data } = await api.get("/moderators"); setMods(data); } catch (e) {}
+  }, []);
+  React.useEffect(() => { load(); }, [load]);
+
+  const create = async (e) => {
+    e.preventDefault();
+    if (busy) return;
+    setBusy(true);
+    try {
+      await api.post("/moderators", { email: email.trim(), password, name: name.trim() || "Moderator" });
+      toast.success("Moderator created");
+      setEmail(""); setName(""); setPassword("");
+      await load();
+    } catch (err) {
+      toast.error(err?.response?.data?.detail || "Could not create moderator");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const remove = async (id, e) => {
+    if (!window.confirm(`Remove moderator ${e}? They will no longer be able to sign in.`)) return;
+    try {
+      await api.delete(`/moderators/${id}`);
+      toast.success("Moderator removed");
+      await load();
+    } catch (err) {
+      toast.error(err?.response?.data?.detail || "Could not remove moderator");
+    }
+  };
+
+  return (
+    <div className="hud-panel p-5 sm:p-6" data-testid="moderators-card">
+      <h2 className="font-display font-black uppercase tracking-[0.08em] text-lg flex items-center gap-2 mb-1.5">
+        <UserPlus size={18} className="text-[var(--kink-purple)]" /> Moderators
+      </h2>
+      <p className="font-mono-data text-[11px] text-[var(--kink-muted)] mb-4">
+        Moderators can create access codes, manage the live queue, and clear chat.
+        They cannot change URLs, safety limits, or manage other moderators.
+      </p>
+
+      <form onSubmit={create} className="space-y-3" data-testid="create-moderator-form">
+        <div>
+          <label className="font-display text-xs tracking-[0.15em] text-[var(--kink-text-2)]">EMAIL</label>
+          <input type="email" required value={email} onChange={(e) => setEmail(e.target.value)}
+            placeholder="mod@example.com" data-testid="moderator-email-input"
+            className="w-full mt-1.5 bg-[var(--kink-base)] border border-[var(--kink-overlay)] px-3 py-2.5 outline-none focus:border-[var(--kink-purple)] transition-colors" />
+        </div>
+        <div>
+          <label className="font-display text-xs tracking-[0.15em] text-[var(--kink-text-2)]">DISPLAY NAME (OPTIONAL)</label>
+          <input value={name} onChange={(e) => setName(e.target.value)}
+            placeholder="Moderator" data-testid="moderator-name-input"
+            className="w-full mt-1.5 bg-[var(--kink-base)] border border-[var(--kink-overlay)] px-3 py-2.5 outline-none focus:border-[var(--kink-purple)] transition-colors" />
+        </div>
+        <div>
+          <label className="font-display text-xs tracking-[0.15em] text-[var(--kink-text-2)]">PASSWORD (MIN 8 CHARS)</label>
+          <input type="password" required minLength={8} value={password} onChange={(e) => setPassword(e.target.value)}
+            placeholder="••••••••" data-testid="moderator-password-input"
+            className="w-full mt-1.5 bg-[var(--kink-base)] border border-[var(--kink-overlay)] px-3 py-2.5 font-mono-data outline-none focus:border-[var(--kink-purple)] transition-colors" />
+        </div>
+        <button type="submit" disabled={busy} data-testid="create-moderator-button"
+          className="w-full bg-[var(--kink-purple)] text-[var(--kink-base)] font-display font-bold tracking-[0.1em] py-2.5 active:scale-95 transition-transform disabled:opacity-50">
+          {busy ? "CREATING…" : "CREATE MODERATOR"}
+        </button>
+      </form>
+
+      <div className="mt-5 space-y-2" data-testid="moderators-list">
+        {mods.length === 0 ? (
+          <p className="font-mono-data text-xs text-[var(--kink-muted)] text-center py-3">No moderators yet.</p>
+        ) : mods.map((m) => (
+          <div key={m.id} className="flex items-center justify-between border border-[var(--kink-overlay)] px-3 py-2.5 bg-[var(--kink-base)]"
+            data-testid={`moderator-row-${m.id}`}>
+            <div className="min-w-0">
+              <p className="font-display text-sm truncate">{m.name}</p>
+              <p className="font-mono-data text-[11px] text-[var(--kink-muted)] truncate">
+                {m.email}{m.twofa_enabled ? " · 2FA on" : ""}
+              </p>
+            </div>
+            <IconBtn testid={`delete-moderator-${m.id}`} onClick={() => remove(m.id, m.email)} icon={Trash2} text="REMOVE" danger />
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

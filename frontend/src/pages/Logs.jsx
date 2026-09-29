@@ -20,6 +20,8 @@ export const ACTION_LABELS = {
   code_deleted: "Code deleted",
   limits_updated: "Safety limits updated",
   urls_updated: "Base URLs updated",
+  moderator_created: "Moderator created",
+  moderator_deleted: "Moderator removed",
   emergency_stop: "Emergency stop",
   session_skipped: "Session skipped",
   logs_cleared: "Log cleared",
@@ -70,6 +72,7 @@ export default function Logs() {
   const [q, setQ] = useState("");
   const [start, setStart] = useState("");
   const [end, setEnd] = useState("");
+  const [modsOnly, setModsOnly] = useState(false);
 
   const params = useCallback((extra = {}) => {
     const p = { limit: PAGE, ...extra };
@@ -77,8 +80,9 @@ export default function Logs() {
     if (q.trim()) p.q = q.trim();
     if (start) p.start = `${start}T00:00:00`;
     if (end) p.end = `${end}T23:59:59`;
+    if (modsOnly) p.moderators_only = true;
     return p;
-  }, [category, q, start, end]);
+  }, [category, q, start, end, modsOnly]);
 
   const load = useCallback(async (reset = true) => {
     setLoading(true);
@@ -96,6 +100,14 @@ export default function Logs() {
   }, [skip, params]);
 
   useEffect(() => { load(true); /* eslint-disable-next-line */ }, []);
+
+  // Re-fetch immediately when the moderators-only scope is toggled (the other
+  // filters use the explicit APPLY button).
+  const modsFirst = React.useRef(true);
+  useEffect(() => {
+    if (modsFirst.current) { modsFirst.current = false; return; }
+    load(true); /* eslint-disable-next-line */
+  }, [modsOnly]);
 
   const applyFilters = () => load(true);
 
@@ -174,7 +186,16 @@ export default function Logs() {
         </div>
 
         <div className="flex flex-wrap items-center justify-between gap-3 mt-5 pt-5 border-t border-[var(--kink-overlay)]">
-          <span className="font-mono-data text-xs text-[var(--kink-muted)]" data-testid="log-total">{total} event{total !== 1 ? "s" : ""}</span>
+          <div className="flex items-center gap-4">
+            <span className="font-mono-data text-xs text-[var(--kink-muted)]" data-testid="log-total">{total} event{total !== 1 ? "s" : ""}</span>
+            <label className="flex items-center gap-2 font-mono-data text-xs text-[var(--kink-text-2)] cursor-pointer select-none" data-testid="log-mods-only-row">
+              <input type="checkbox" checked={modsOnly}
+                onChange={(e) => { setModsOnly(e.target.checked); }}
+                data-testid="log-mods-only-toggle"
+                className="accent-[var(--kink-purple)]" />
+              Moderator actions only
+            </label>
+          </div>
           <div className="flex flex-wrap gap-2">
             <button onClick={() => exportLog("csv")} data-testid="log-export-csv"
               className="flex items-center gap-1.5 border border-[var(--kink-overlay)] px-3 py-2 font-mono-data text-xs hover:border-[var(--kink-purple)]/50 hover:text-[var(--kink-purple)] transition-colors">
