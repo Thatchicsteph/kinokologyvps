@@ -110,11 +110,16 @@ const PANEL_DEFS = {
 
 const ALL_PANEL_IDS = Object.keys(PANEL_DEFS);
 
-// Panels only the OWNER may see/use. Moderators can create codes, manage the
-// queue and remove chat, but must not touch URLs, safety limits, or manage
-// other moderator logins. Backend enforces this too (require_owner) — this is
-// just the matching UI hiding.
-const OWNER_ONLY_PANELS = new Set(["base-urls", "safety-limits", "moderators"]);
+// Panels a MODERATOR may never see/use. Backend enforces the sensitive ones too
+// (require_owner on URLs, safety limits, moderator management). The device
+// panels are hidden because a moderator must not hold the Bluetooth/OSSM link.
+const OWNER_ONLY_PANELS = new Set([
+  "base-urls", "safety-limits", "moderators",  // owner-only config
+  "toy-control", "device-activity",            // the OSSM console + Bluetooth host
+]);
+// On the Setup tab a moderator sees ONLY these ids (2FA setup). Everything else
+// in the setup section is hidden for them.
+const MODERATOR_SETUP_ALLOWED = new Set(["two-factor"]);
 
 // Live vs Setup classification. "Live" = things you touch/watch DURING a session
 // (stream, device, controls, who's connected, health). "Setup" = configure-once
@@ -549,7 +554,14 @@ export default function AdminDashboard() {
   // may create codes, manage the queue and remove chat, but cannot see or reach
   // the URL, safety-limit, or moderator-management panels (backend also enforces).
   const isOwner = !user || (user.role || "owner") === "owner";
-  const canSeePanel = (id) => !OWNER_ONLY_PANELS.has(id) || isOwner;
+  // Owner sees everything. A moderator loses the device/OSSM + owner-config
+  // panels, and on the Setup tab sees ONLY the allowed ids (2FA setup).
+  const canSeePanel = (id) => {
+    if (isOwner) return true;
+    if (OWNER_ONLY_PANELS.has(id)) return false;
+    if (sectionOf(id) === "setup" && !MODERATOR_SETUP_ALLOWED.has(id)) return false;
+    return true;
+  };
   const bleRef = useRef(null);
   const toys = useToys({
     onStatusChange: ({ available, pattern }) => {
@@ -681,12 +693,14 @@ export default function AdminDashboard() {
   // lock state) needs to be open the entire time the admin page is mounted —
   // chat + kill switch don't require an OSSM or toys to be present, and BLE
   // requires a user gesture to reconnect after refresh which we can't do
-  // automatically.
+  // automatically. Only the OWNER opens it: the backend allows a single host
+  // slot and rejects moderator tokens (4403), so a moderator must not claim it.
   useEffect(() => {
+    if (!isOwner) return;
     ble.openHostWs();
     return () => { ble.closeHostWs(); };
     // eslint-disable-next-line
-  }, []);
+  }, [isOwner]);
 
   const createCode = async (e) => {
     e.preventDefault();

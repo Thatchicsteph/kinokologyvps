@@ -998,9 +998,18 @@ async def delete_session_history(hist_id: str, user: dict = Depends(get_current_
 async def ws_host(ws: WebSocket):
     token = ws.query_params.get("token", "")
     try:
-        decode_token(token)
+        payload = decode_token(token)
     except Exception:
         await ws.close(code=4401)
+        return
+    # Only the owner may hold the device/OSSM link — moderators are authenticated
+    # but must never become the Bluetooth host.
+    try:
+        host_user = await db.users.find_one({"_id": ObjectId(payload["sub"])})
+    except Exception:
+        host_user = None
+    if not host_user or not is_owner(host_user):
+        await ws.close(code=4403)
         return
     await ws.accept()
     hub.host_ws = ws
